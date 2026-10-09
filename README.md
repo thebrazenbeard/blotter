@@ -14,24 +14,25 @@ A single globally ordered stream replaces the operational fragmentation of the o
 
 This source implements a **local, single-host Python/SQLite prototype**, not a live cross-host service. All processes using the same local database file see the same monotonically sequenced log. For multiple workstations, a shared centralized service with authenticated read/write adapters remains to be built. Merely cloning this repository on separate machines does not make their logs shared.
 
-Requires Python 3.10+, no third-party runtime packages. From the repository root:
+Requires Python 3.10+, no third-party runtime packages. The default is **one ledger per host** at ~/.blotter/activity.sqlite3 regardless of the working repository. Every agent on the host must use this same path (or the same BLOTTER_DB override), never a separate file per agent or repo. This does **not** synchronize different hosts. From the repository root:
 
     python -m pip install -e .
-    blotter --db .blotter/activity.sqlite3 init
-    blotter --db .blotter/activity.sqlite3 check --actor agent.one --session turn-01 --after-seq 0
-    blotter --db .blotter/activity.sqlite3 record --actor agent.one --session turn-01 --kind tool.executed --message "Ran unit tests" --evidence OBSERVATION --payload '{"exit_code":0}'
-    blotter --db .blotter/activity.sqlite3 check --actor agent.two --session turn-02 --after-seq 0
-    blotter --db .blotter/activity.sqlite3 list
-    blotter --db .blotter/activity.sqlite3 verify
+    blotter init
+    blotter check --actor agent.one --session turn-01 --after-seq 0
+    blotter record --actor agent.one --session turn-01 --kind tool.executed --message "Ran unit tests" --evidence OBSERVATION --payload '{"exit_code":0}'
+    blotter check --actor agent.two --session turn-02 --after-seq 0
+    blotter list
+    blotter verify
 
 For an uninstalled checkout, set PYTHONPATH=src and replace the blotter command with python -m agent_blotter. On PowerShell: $env:PYTHONPATH='src'.
 
-**Cursor handling:** a check returns events, check_event, next_seq, has_more, and visible_head_seq. Persist next_seq **per agent** between turns. Read all events returned. If has_more is true, check again using next_seq before doing other work. The act of checking is itself appended to the same stream as a turn.checked event. Filtering list by agent, session, or kind creates a view and **never** another lane.
+**Cursor handling:** a check returns events, check_event, next_seq, has_more, and visible_head_seq. Persist next_seq **per agent** between turns. Read all events returned. If has_more is true, check again using next_seq before doing other work. A cursor that points beyond this ledger's current head is rejected rather than silently skipping history. The act of checking is itself appended to the same stream as a turn.checked event. Filtering list by agent, session, or kind creates a view and **never** another lane.
 
 ## Python use
 
     from agent_blotter import Blotter
-    ledger = Blotter(".blotter/activity.sqlite3")
+    from pathlib import Path
+    ledger = Blotter(Path.home() / ".blotter" / "activity.sqlite3")
     view = ledger.check(actor="agent.one", session="turn-01", after_seq=0)
     while view["has_more"]:
         # consume view["events"] before obtaining the next page

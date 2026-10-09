@@ -54,7 +54,7 @@ class BlotterTests(unittest.TestCase):
 
     def test_no_fake_check_event(self):
         with self.assertRaises(BlotterError):
-            self.note(kind=None) if False else self.ledger.record(
+            self.ledger.record(
                 actor="one", kind="turn.checked", message="fake")
         self.assertEqual(self.ledger.verify()["count"], 0)
 
@@ -82,14 +82,20 @@ class BlotterTests(unittest.TestCase):
         with self.assertRaises(BlotterError):
             self.ledger.check(actor="a", after_seq=-1)
         with self.assertRaises(BlotterError):
+            self.ledger.check(actor="a", after_seq=10000)
+        with self.assertRaises(BlotterError):
             self.ledger.list(limit=0)
         self.assertEqual(self.ledger.verify()["count"], 0)
 
     def test_modified_chain_detected(self):
         self.note()
         self.note()
-        with sqlite3.connect(self.ledger.path) as db:
+        db = sqlite3.connect(self.ledger.path)
+        try:
             db.execute("UPDATE events SET body=? WHERE seq=1", ('{"seq":1}',))
+            db.commit()
+        finally:
+            db.close()
         with self.assertRaises(IntegrityError):
             self.ledger.verify()
 

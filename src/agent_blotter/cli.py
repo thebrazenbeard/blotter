@@ -12,8 +12,8 @@ from .store import Blotter, BlotterError, IntegrityError
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="blotter", description="One shared chronological agent activity blotter")
-    parser.add_argument("--db", default=os.environ.get("BLOTTER_DB", ".blotter/blotter.sqlite3"),
-                        help="path to the shared local SQLite file")
+    parser.add_argument("--db", default=os.environ.get("BLOTTER_DB", str(Path.home() / ".blotter" / "activity.sqlite3")),
+                        help="shared local SQLite file (default ~/.blotter/activity.sqlite3; override BLOTTER_DB)")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="initialize the shared activity ledger")
     check = commands.add_parser("check", help="read activity since last turn and log the check")

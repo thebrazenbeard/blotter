@@ -226,6 +226,8 @@ class Blotter:
             db.execute("BEGIN IMMEDIATE")
             try:
                 latest = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
+                if after_seq > latest:
+                    raise BlotterError("cursor is beyond this ledger head")
                 rows = db.execute(
                     "SELECT body FROM events WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?",
                     (after_seq, latest, limit + 1),
