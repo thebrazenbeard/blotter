@@ -15,7 +15,7 @@ This design supersedes the *fragmented visibility* problem of chat-communication
 - list, export and verify read one stream. Filters produce views only. verify checks local hash-chain continuity and mirrored indexed fields; it cannot prove a malicious privileged writer did not rewrite the database.
 - Connections are explicitly closed after each operation, including on Windows.
 
-A SQLite database is not itself a cross-host synchronization mechanism. WAL databases must remain on supported local filesystems. A later central service can own this one log and expose authenticated agent APIs. Multiple independently local ledgers do **not** satisfy the product goal.
+A SQLite database is not itself a cross-host synchronization mechanism. WAL databases must remain on supported local filesystems. This branch additionally implements an **optional central HTTP service and remote client** backed by one SQLite ledger: per-agent bearer credentials bind actor identity; the server defaults to loopback and requires TLS certificate/key for non-loopback binding. The client refuses non-loopback cleartext HTTP. The source tests exercise a shared sequence across agents, credential isolation and concurrent writes. This is not proof of an installed central host or secure production deployment. Multiple independently local ledgers do **not** satisfy the product goal.
 
 ## Observability and evidence
 
@@ -25,7 +25,7 @@ P.O.R.T.A.L. remains orchestration/execution; Blotter is an activity record. CCB
 
 ## Gaps before a real replacement
 
-1. Authenticated network service + single storage authority, tested for cross-host writes, replay, failure and continuity.
+1. Qualify the already implemented authenticated single-authority network server in an actual controlled cross-host deployment, including TLS credential lifecycle, failure/recovery, backup/restore and replay semantics; source-level loopback tests are insufficient.
 2. Turn hooks/adapters that actually cause **every agent** to check and append **every** action, with persistent per-agent cursors and evidence about coverage; current APIs cannot force unaffiliated runtimes to comply.
 3. Efficient whole-log search and bounded catch-up when thousands of agents produce many records; current cursor pagination avoids whole-file reads but not operational backlog.
 4. Tamper-resistant receipts, access policy, backpressure, backups/retention, sensitive-data controls, reconciliation and recovery from disconnected agents.
