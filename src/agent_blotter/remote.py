@@ -31,7 +31,8 @@ class RemoteBlotter:
         self.timeout = timeout
 
     def _request(self, route: str, data: dict[str, Any] | None = None) -> dict:
-        headers = {"Authorization": "Bearer " + self.token, "Accept": "application/json"}
+        headers = {"Authorization": "Bearer " + self.token,
+                   "X-Blotter-Actor": self.actor, "Accept": "application/json"}
         body = None
         if data is not None:
             body = json.dumps(data, allow_nan=False).encode("utf-8")
@@ -43,9 +44,12 @@ class RemoteBlotter:
                 return json.load(reply)
         except urllib.error.HTTPError as exc:
             try:
-                reason = json.loads(exc.read().decode("utf-8")).get("error", "request rejected")
-            except (ValueError, UnicodeError):
-                reason = "request rejected"
+                try:
+                    reason = json.loads(exc.read().decode("utf-8")).get("error", "request rejected")
+                except (ValueError, UnicodeError):
+                    reason = "request rejected"
+            finally:
+                exc.close()
             raise BlotterError(f"server rejected request ({exc.code}): {reason}") from exc
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
             # POST effect is ambiguous on disconnect. The caller must reconcile by ID.

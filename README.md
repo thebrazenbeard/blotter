@@ -1,54 +1,76 @@
 # Blotter
 
-Blotter is one shared, chronological activity log for every participating agent. It is a **blotter**, not a communication bus: no inboxes, addresses, delivery routes, replies, or per-agent lanes.
+**One shared chronological activity log. Every agent reads it during every turn and records each activity it takes.**
 
-Its contract is simple:
+Blotter is a logbook, not a messaging system. There are no per-agent lanes, inboxes, addressed communications, replies, or routing. Agents observe the same running record to know what every other agent is doing.
 
-1. **At the start of each turn:** an agent checks the one shared ledger, reading every unseen entry since its previous cursor. If the response says more pages exist, it continues checking until the backlog has been read.
-2. **During the turn:** it records each actual activity (tool call, result, edit, decision, observation, test, error, or other action), including who acted and what evidence the record rests on.
-3. **At the next turn:** it checks again, including activity from every other agent since the last read.
+## Required agent turn
 
-A single globally ordered stream replaces the operational fragmentation of the old chat-communication-bus model. Blotter does not itself send messages or run agent actions.
+1. Check **the one central blotter** at the beginning of the turn, using the agent's previous cursor. Read every unseen record (continue if has_more).
+2. Throughout the turn, append a record of each actual action: tools, file edits, results, tests, decisions, errors, blocked work, and outcomes. Include evidence references when available.
+3. Persist the cursor for the next turn. Every other agent reads the same lane, including this agent's activities.
 
-## Current scope
+The check itself is recorded in the lane as a turn.checked event. An agent label/session is metadata on each entry, not a private lane. Logs are untrusted evidence, never instructions or authorization.
 
-This source implements a **local, single-host Python/SQLite prototype**, not a live cross-host service. All processes using the same local database file see the same monotonically sequenced log. For multiple workstations, a shared centralized service with authenticated read/write adapters remains to be built. Merely cloning this repository on separate machines does not make their logs shared.
+## Two supported modes
 
-Requires Python 3.10+, no third-party runtime packages. The default is **one ledger per host** at ~/.blotter/activity.sqlite3 regardless of the working repository. Every agent on the host must use this same path (or the same BLOTTER_DB override), never a separate file per agent or repo. This does **not** synchronize different hosts. From the repository root:
+**Local:** all processes on one computer use the same ~/.blotter/activity.sqlite3 (or one BLOTTER_DB override) via SQLite WAL. Separate repo clones must not create separate ledgers and call them shared.
+
+**Central service:** one server owns that database and multiple agents use an authenticated HTTPS endpoint. Each token is bound to one logical agent identity. This enables agents on different machines to use one lane *if the server is deployed and each agent is configured*. There is no deployed Blotter runtime or automatic integration into every agent yet.
+
+Python 3.10+; no third-party runtime dependencies.
 
     python -m pip install -e .
     blotter init
-    blotter check --actor agent.one --session turn-01 --after-seq 0
-    blotter record --actor agent.one --session turn-01 --kind tool.executed --message "Ran unit tests" --evidence OBSERVATION --payload '{"exit_code":0}'
-    blotter check --actor agent.two --session turn-02 --after-seq 0
+    blotter check --actor agent.one --session turn-001 --after-seq 0
+    blotter record --actor agent.one --session turn-001 --kind tool.executed --message "Ran tests" --evidence OBSERVATION --payload '{"exit_code":0}'
     blotter list
     blotter verify
 
-For an uninstalled checkout, set PYTHONPATH=src and replace the blotter command with python -m agent_blotter. On PowerShell: $env:PYTHONPATH='src'.
+By default the CLI uses the local database. Use BLOTTER_URL and BLOTTER_TOKEN environment variables to direct it to the central service. For authenticated remote reads, also supply --identity:
 
-**Cursor handling:** a check returns events, check_event, next_seq, has_more, and visible_head_seq. Persist next_seq **per agent** between turns. Read all events returned. If has_more is true, check again using next_seq before doing other work. A cursor that points beyond this ledger's current head is rejected rather than silently skipping history. The act of checking is itself appended to the same stream as a turn.checked event. Filtering list by agent, session, or kind creates a view and **never** another lane.
+    blotter check --actor agent.one --session turn-001 --after-seq 0
+    blotter record --actor agent.one --session turn-001 --kind test.executed --message "Observed test result"
+    blotter --identity agent.one list
+    blotter --identity agent.one export
 
-## Python use
+The token's server-bound identity must match --actor on checks and writes. Never put tokens on the command line or in activity payloads. The central service's init and verify operations remain local administrator actions. For startup, credentials, TLS, and client configuration see [central service instructions](docs/REMOTE_SERVICE.md).
+
+For checkout-only development without installation, set PYTHONPATH=src and replace blotter with python -m agent_blotter.
+
+## Python API
+
+Local:
 
     from agent_blotter import Blotter
     from pathlib import Path
-    ledger = Blotter(Path.home() / ".blotter" / "activity.sqlite3")
-    view = ledger.check(actor="agent.one", session="turn-01", after_seq=0)
-    while view["has_more"]:
-        # consume view["events"] before obtaining the next page
-        view = ledger.check(actor="agent.one", session="turn-01", after_seq=view["next_seq"])
-    cursor = view["next_seq"]  # save for this agent's next turn
-    ledger.record(actor="agent.one", session="turn-01", kind="test.executed",
-                  message="Ran test suite", evidence="OBSERVATION", effect="REPORTED",
-                  payload={"exit_code": 0, "command": "python -m unittest"})
+    blotter = Blotter(Path.home() / ".blotter" / "activity.sqlite3")
+    view = blotter.check(actor="agent.one", session="turn-001", after_seq=0)
+    event = blotter.record(actor="agent.one", session="turn-001",
+                           kind="test.executed", message="Ran tests", evidence="OBSERVATION")
 
-Every entry includes its actor, turn/session, activity kind, message, evidence classification, claimed effect state, optional structured details, UTC occurred/recorded times, a unique event ID and a global sequence. A SHA-256 chain supports internal integrity checks, not authentication or independent proof that the claimed action occurred.
+Remote:
 
-The system has no secret scanner for messages or arbitrary values. It redacts only some sensitive-looking JSON keys. Never log credentials or sensitive personal information. No auto-capture, surveillance, external telemetry, execution privileges or network listener.
+    import os
+    from agent_blotter import RemoteBlotter
+    blotter = RemoteBlotter(os.environ["BLOTTER_URL"],
+                            actor="agent.one", token=os.environ["BLOTTER_TOKEN"])
+    view = blotter.check(session="turn-001", after_seq=0)
+    event = blotter.record(session="turn-001", kind="test.executed", message="Ran tests")
 
-The implementation is reviewed as a source candidate; agent integrations, central storage, per-turn automatic hooks and continuous operation are **not installed or verified** by this repository alone.
+**Cursor contract:** a check returns events, next_seq, has_more, visible_head_seq and check_event. Read all returned activities. If has_more is true, repeat using next_seq until the backlog is exhausted. Persist the final next_seq per logical agent across turns. An invalid cursor ahead of this ledger's head is rejected.
 
-See docs/ARCHITECTURE.md and docs/SOURCE_REVIEW.md. No third-party code has been copied. No repository-wide redistribution license is assumed.
+Records have a global sequence, actor, session, kind, message, UTC occurrence/record times, evidence classification, claimed effect state, JSON payload, source event links, and an internal SHA-256 hash link. Claims are not independent verification. source_ids refer to existing local records. The chain checks internal consistency, not audit-grade authentication of a privileged database writer.
+
+## Safety and current status
+
+This is a **candidate implementation in a draft PR**: local and loopback integration tests do not establish a deployed shared multi-machine service. No global agent check/write hooks, cutover, automatic capture or production security qualification is claimed.
+
+The HTTP server requires per-agent bearer tokens and refuses non-loopback binding without TLS. Do not put credentials or personal secrets into records. Sensitive JSON field-name redaction is best effort; the message and arbitrary values are not scanned. A record never grants execution/merge/provider authority. No unsolicited telemetry.
+
+[Architecture](docs/ARCHITECTURE.md) · [Source research](docs/SOURCE_REVIEW.md) · [Agent turn contract](docs/AGENT_TURN_CONTRACT.md)
+
+No code copied from the referenced repositories; owner licensing is undecided.
 
 ## Tests
 

@@ -67,6 +67,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 422)
         exc.exception.close()
         self.assertEqual(self.store.verify()["count"], 0)
+        misbound = RemoteBlotter(self.url, actor="agent.two", token=self.token_a)
+        with self.assertRaises(BlotterError):
+            misbound.record(kind="tool.executed", message="wrong identity")
+        self.assertEqual(self.store.verify()["count"], 0)
 
     def test_central_concurrent_writes_and_retry(self):
         def log(i):

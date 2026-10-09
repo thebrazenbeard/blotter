@@ -1,33 +1,27 @@
-# Architecture — one shared activity lane
+# Architecture: one activity log, no agent messaging
 
-## Primary invariant
+The product invariant is **ONE SHARED CHRONOLOGICAL BLOTTER**. Every participating agent checks that central record each turn and appends each activity as it happens. Each actor is a field; there are no actor-specific lanes, addressed conversations or subscriptions.
 
-**ONE LOG, ALL AGENTS, ALL ACTIVITIES.** Every participating agent inspects the same chronological log during each turn, then records the activities it performs to that same log. An identity is a record field, not a separate writer lane. The log does not replace agent identity, authority, or task scheduling.
+Agents independently decide their next work by reading the same log, not by receiving messages. A logged statement is not a command, completion receipt or authorization.
 
-This design supersedes the *fragmented visibility* problem of chat-communication-bus. It is **not** the bus reimplemented with new names: no message addressing, subscriptions, replies, inboxes, DLQ, mailboxes, delivery acknowledgements, or communication routing. Agent cooperation arises from looking at the same record.
+## One central store
 
-## Implemented local prototype
+The implemented storage engine is a SQLite v1 events table, global autoincrement sequence, WAL mode, transactional BEGIN IMMEDIATE for append and check, content-checked idempotency with explicit event IDs, 64 KiB event limit and SHA-256 previous-hash link. Writes come through a **single service-owned local DB** for multi-machine use; readers on other hosts use authenticated HTTP(S).
 
-- Python 3.10+ standard library and one SQLite file, schema v1, WAL, busy timeout, explicit BEGIN IMMEDIATE writer transactions.
-- Events are immutable through the public API and globally sequenced in one events table. All agents write into the same table regardless of actor/session.
-- check(actor, session, after_seq, limit) obtains a consistent pre-check snapshot while holding a write transaction, returns unseen activities, and appends a turn.checked observation into the same stream. If has_more is true the agent must continue paging; it cannot claim to have read the full backlog.
-- record(actor, kind, message, payload, evidence, effect, ...) appends an activity. Idempotent explicit event IDs detect mismatched retries. Local event source references must exist before insertion. Records are data and confer no execution authority.
-- list, export and verify read one stream. Filters produce views only. verify checks local hash-chain continuity and mirrored indexed fields; it cannot prove a malicious privileged writer did not rewrite the database.
-- Connections are explicitly closed after each operation, including on Windows.
+The Python client and CLI both support local and remote modes. For local processes the database defaults to ~/.blotter/activity.sqlite3 on that host. For networked agents, configure **one BLOTTER_URL**, not an individual SQLite database per checkout. Tokens are individually mapped to stable actor identities, and the HTTP server binds actor from the token.
 
-A SQLite database is not itself a cross-host synchronization mechanism. WAL databases must remain on supported local filesystems. A later central service can own this one log and expose authenticated agent APIs. Multiple independently local ledgers do **not** satisfy the product goal.
+The API makes turn checks observable in the same event stream. It returns an activity cursor for pagination; agents must read all pages. Action recording requires their host controller to call record() for **every** actual activity. The source cannot magically observe every agent or verify that externally hosted agents faithfully participate.
 
-## Observability and evidence
+## Source influences and boundaries
 
-An event is a claim about an action, not automatic verification. An agent may mark a report as OBSERVATION, RETRIEVED, INFERENCE, etc., and an effect as REPORTED, OBSERVED, VERIFIED, or UNKNOWN; these remain agent assertions until verified against underlying independent evidence. Provenance can include exact external artifact hashes, runner receipts, Git heads, or Tattler sampling source details in the payload. No automatic collection is present.
+CCB and ccb-core informed durable identity/idempotency and verification distinctions, not lane or routing mechanics. P.O.R.T.A.L. continues to own task orchestration and evidence-bearing effects. Blotter never dispatches work or grants authority. Tattler, Anya, BigCactusLabs/blotter, and conventional logging tools informed typed observations, explicit activity entries and safe append patterns. Full details in SOURCE_REVIEW.md.
 
-P.O.R.T.A.L. remains orchestration/execution; Blotter is an activity record. CCB/ccb-core informed the distinction between logical identity and session, safe retry, timestamp vs ordering, and delivery vs incorporation. None of their route/assignment machinery is imported. Tattler can later contribute evidence-bearing sampled observations, with explicit opt-in and no concealed monitoring.
+Observations and effect states are self-reported; source refs may point to prior local activity events. External receipts must be separately checked. The hash chain detects accidental local tampering but can be recomputed by a privileged writer. Secrets in free text are not removed. No surveillance or automatic telemetry.
 
-## Gaps before a real replacement
+## Outstanding work
 
-1. Authenticated network service + single storage authority, tested for cross-host writes, replay, failure and continuity.
-2. Turn hooks/adapters that actually cause **every agent** to check and append **every** action, with persistent per-agent cursors and evidence about coverage; current APIs cannot force unaffiliated runtimes to comply.
-3. Efficient whole-log search and bounded catch-up when thousands of agents produce many records; current cursor pagination avoids whole-file reads but not operational backlog.
-4. Tamper-resistant receipts, access policy, backpressure, backups/retention, sensitive-data controls, reconciliation and recovery from disconnected agents.
-
-Do not claim global operational awareness, replacement cutover, or audit-grade authenticity until these are implemented and independently verified.
+- Install an approved central service and authenticate all actual participating agents.
+- Integrate reliable per-turn read and per-activity write hooks into each agent's execution environment, storing each agent's cursor durably. Define reporting for missed check/write coverage.
+- Qualify live cross-host TLS, storage backups/restart/recovery, load/backpressure, secure token rotation and rate limits.
+- Independently validate declared activities and external effects against owning-system receipts.
+- Only then plan any CCB operational cutover. No migration, merge, provider retirement, production deployment or automatically running service is implied by code being present.

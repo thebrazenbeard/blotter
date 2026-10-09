@@ -97,6 +97,10 @@ def create_server(
             supplied = header[7:]
             for token, actor in credentials.items():
                 if hmac.compare_digest(supplied, token):
+                    expected = self.headers.get("X-Blotter-Actor")
+                    if expected is not None and expected != actor:
+                        self._send(403, {"error": "credential identity mismatch"})
+                        return None
                     return actor
             self._send(403, {"error": "invalid credentials"})
             return None
