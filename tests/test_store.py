@@ -66,8 +66,9 @@ class BlotterTests(unittest.TestCase):
         self.assertEqual(self.ledger.verify()["count"], 1)
 
     def test_redaction_and_export(self):
-        ev = self.note(payload={"password": "secret", "nested": [{"api_key": "hidden"}]})
+        ev = self.note(payload={"password": "secret", "token": "secret-token", "nested": [{"api_key": "hidden"}]})
         self.assertEqual(ev["payload"]["password"], "[REDACTED]")
+        self.assertEqual(ev["payload"]["token"], "[REDACTED]")
         self.assertEqual(ev["payload"]["nested"][0]["api_key"], "[REDACTED]")
         self.assertEqual(json.loads(list(self.ledger.export())[0])["id"], ev["id"])
         self.assertEqual(list(self.ledger.export(after_seq=1)), [])

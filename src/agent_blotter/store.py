@@ -21,7 +21,7 @@ EFFECTS = frozenset(("NONE", "PROPOSED", "ATTEMPTED", "REPORTED",
                      "OBSERVED", "VERIFIED", "UNKNOWN"))
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,127}$")
 SENSITIVE_KEY = re.compile(
-    r"(^|[_\-])(password|passwd|secret|api[_\-]?key|access[_\-]?token|refresh[_\-]?token|"
+    r"(^|[_\-])(password|passwd|secret|token|api[_\-]?key|access[_\-]?token|refresh[_\-]?token|"
     r"auth(?:orization)?|cookie|credential|private[_\-]?key|session[_\-]?token)([_\-]|$)",
     re.IGNORECASE,
 )
