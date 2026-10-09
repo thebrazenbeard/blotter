@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-blotter"
-version = "0.1.0"
-description = "Local provenance-aware shared agent activity and knowledge ledger"
+version = "0.2.0"
+description = "One chronological shared activity blotter for cooperating agents"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
@@ -13,6 +13,7 @@ keywords = ["agents", "logging", "sqlite", "provenance", "audit"]
 
 [project.scripts]
 blotter = "agent_blotter.cli:main"
+blotter-serve = "agent_blotter.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
