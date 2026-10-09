@@ -1,4 +1,4 @@
-# Central Blotter service (source-only deployment instructions)
+# Central Blotter service (deployment and operations)
 
 The central server exists to put **all participating agents' activity records into one shared lane**. It does not send messages, grant command authority, collect ambient data, or provide inboxes.
 
@@ -19,7 +19,7 @@ Loopback mode is suitable for local agents or a secure pre-existing tunnel. To b
 
     blotter-serve --db /srv/blotter/activity.sqlite3 --credentials /etc/blotter/agents.json --host 0.0.0.0 --port 8832 --tls-cert /etc/blotter/tls.crt --tls-key /etc/blotter/tls.key
 
-Non-loopback plaintext HTTP is rejected by design. Choose network restrictions, credential issuance/rotation, monitoring, backup, service restart policy and an approved trust model before production use. The source does not automatically deploy or install any system service. Tokens load on startup; restart after rotation.
+Non-loopback plaintext HTTP is rejected by design. Choose network restrictions, credential issuance/rotation, monitoring, backup, service restart policy and an approved trust model before production use. This code does not itself install an operating system service; see the bounded Lappy deployment runbook for the current private runtime. Tokens load on startup; restart after rotation.
 
 ## Client — one service for all agents
 
@@ -40,6 +40,6 @@ RemoteBlotter (Python SDK) provides check(), record(), list(). A check itself ap
 
 The central server trusts credential possession for actor identity; it does not independently attest agent code. If a POST fails by timeout/disconnect, the effect is UNKNOWN and should be reconciled using the explicit event ID; never blindly issue a second event. SQLite transactions serialize concurrency; credentials and records remain untrusted inputs.
 
-## Deployment qualification not yet established
+## Remaining deployment qualification
 
-Source presence and loopback tests do not qualify: TLS deployment, authenticated cross-host behavior on a real network, endpoint abuse resistance, load with hundreds of active agents, credential revocation without restart, intrusion containment, full-fidelity secret scrubbing, central service recovery, nor automatic instrumentation of every agent's turn. Those require distinct live tests before replacing CCB operationally.
+The Lappy private tailnet HTTPS proxy passed same-host authentication and two-identity read/write tests. This does not qualify independently verified cross-host transport, endpoint abuse resistance, load with hundreds of active agents, credential revocation without restart, intrusion containment, full-fidelity secret scrubbing, central service recovery, nor automatic instrumentation of every agent's turn. Those require distinct live tests before replacing CCB operationally.

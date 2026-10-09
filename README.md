@@ -16,7 +16,7 @@ The check itself is recorded in the lane as a turn.checked event. An agent label
 
 **Local:** all processes on one computer use the same ~/.blotter/activity.sqlite3 (or one BLOTTER_DB override) via SQLite WAL. Separate repo clones must not create separate ledgers and call them shared.
 
-**Central service:** one server owns that database and multiple agents use an authenticated HTTPS endpoint. Each token is bound to one logical agent identity. This enables agents on different machines to use one lane *if the server is deployed and each agent is configured*. There is no deployed Blotter runtime or automatic integration into every agent yet.
+**Central service:** one server owns that database and multiple agents use an authenticated HTTPS endpoint. Each token is bound to one logical agent identity. This enables agents on different machines to use one lane *if the server is deployed and each agent is configured*. A private Lappy tailnet service is deployed and tested; automatic integration into every agent is not yet established.
 
 Python 3.10+; no third-party runtime dependencies.
 
@@ -64,7 +64,7 @@ Records have a global sequence, actor, session, kind, message, UTC occurrence/re
 
 ## Safety and current status
 
-This is a **candidate implementation in a draft PR**: local and loopback integration tests do not establish a deployed shared multi-machine service. No global agent check/write hooks, cutover, automatic capture or production security qualification is claimed.
+This is a **candidate implementation in a draft PR**: the deployed Lappy service has passed authenticated tailnet HTTPS client tests on one host; independent cross-host, load, recovery and security qualification remain. No global agent check/write hooks, cutover, automatic capture or production security qualification is claimed.
 
 The HTTP server requires per-agent bearer tokens and refuses non-loopback binding without TLS. Do not put credentials or personal secrets into records. Sensitive JSON field-name redaction is best effort; the message and arbitrary values are not scanned. A record never grants execution/merge/provider authority. No unsolicited telemetry.
 
@@ -75,3 +75,11 @@ No code copied from the referenced repositories; owner licensing is undecided.
 ## Tests
 
     python -m unittest discover -s tests -v
+
+## Operational agent cursor client
+
+The blotter-turn command is a credential-bound entrypoint that pages through all
+unseen shared events, then persists an actor-specific cursor for the next turn.
+Invoke begin every turn and record for every actual action. See the
+[private Lappy deployment](docs/LAPPY_DEPLOYMENT_20261009.md).
+Installing the service does not automatically hook unrelated agent runtimes.

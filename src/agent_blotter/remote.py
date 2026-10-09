@@ -18,8 +18,13 @@ class RemoteBlotter:
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise BlotterError("invalid Blotter URL")
-        if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
-            raise BlotterError("URL must not contain credentials, query, fragment or path")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise BlotterError("URL must not contain credentials, query or fragment")
+        # An authenticated HTTPS proxy can mount this API at a safe URL prefix.
+        import re
+        if (not re.fullmatch(r"(?:/[A-Za-z0-9._~-]+)*/?", parsed.path)
+                or any(x in (".", "..") for x in parsed.path.split("/"))):
+            raise BlotterError("unsafe Blotter URL path")
         if parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "::1", "localhost"):
             raise BlotterError("remote Blotter requires HTTPS")
         if not isinstance(token, str) or len(token) < 32:
