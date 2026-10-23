@@ -102,4 +102,14 @@ class TurnTests(unittest.TestCase):
         with self.assertRaisesRegex(BlotterError, "cursor belongs"):
             begin_turn(self.one, self.state, session="second")
 
+    def test_prehashed_legacy_cursor_requires_explicit_reenrollment(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        old = self.state / "agent.one.json"
+        old.write_text(json.dumps({"url": self.one.url, "cursor": 18}),
+                       encoding="utf-8")
+        with self.assertRaisesRegex(BlotterError, "legacy cursor detected"):
+            begin_turn(self.one, self.state, session="legacy")
+        self.assertEqual(self.db.verify()["count"], 0)
+        self.assertEqual(len(list(self.state.glob("actor-*.json"))), 0)
+
 if __name__=="__main__":unittest.main()
