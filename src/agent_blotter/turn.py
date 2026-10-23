@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import sys
 import tempfile
 from .remote import RemoteBlotter
@@ -50,7 +49,8 @@ def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: i
     # Inspect only literal, non-traversing path components. Never resolve
     # actor-provided "." or ".." segments or use a legacy path for writing.
     legacy_parts = actor.split("/")
-    if all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:@-]*", part)
+    if all(part not in ("", ".", "..") and
+           (os.name != "nt" or ":" not in part)
            for part in legacy_parts):
         old_path = folder.joinpath(*legacy_parts[:-1], legacy_parts[-1] + ".json")
         if old_path.exists() and not path.exists():
