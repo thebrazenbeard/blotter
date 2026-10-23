@@ -57,8 +57,16 @@ def create_server(
     port: int = 8832, *, certfile: str | None = None, keyfile: str | None = None,
 ) -> ThreadingHTTPServer:
     """Create a bound service. Non-loopback binds require server TLS."""
-    if not credentials:
+    if not isinstance(credentials, dict) or not credentials:
         raise BlotterError("at least one authenticated agent is required")
+    seen_actors = set()
+    for token, actor in credentials.items():
+        if not isinstance(token, str) or not 32 <= len(token) <= 4096:
+            raise BlotterError("each server credential must contain 32-4096 characters")
+        _valid_id(actor, "actor")
+        if actor in seen_actors:
+            raise BlotterError("duplicate actor identity in credentials")
+        seen_actors.add(actor)
     try:
         loopback = ipaddress.ip_address(host).is_loopback
     except ValueError:
