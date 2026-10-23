@@ -138,13 +138,14 @@ def create_server(
             try:
                 obj = self._body()
                 if route == "/v1/check":
-                    if set(obj) - {"session", "after_seq", "limit"}:
+                    if set(obj) - {"session", "after_seq", "limit", "expected_after_hash"}:
                         raise BlotterError("unknown check fields")
                     if type(obj.get("after_seq", 0)) is not int or type(obj.get("limit", 100)) is not int:
                         raise BlotterError("cursor and page size must be integers")
                     result = ledger.check(actor=actor, session=obj.get("session", "default"),
                                           after_seq=obj.get("after_seq", 0),
-                                          limit=min(obj.get("limit", 100), MAX_HTTP_PAGE))
+                                          limit=min(obj.get("limit", 100), MAX_HTTP_PAGE),
+                                          expected_after_hash=obj.get("expected_after_hash"))
                 else:
                     if set(obj) - WRITE_FIELDS:
                         raise BlotterError("unknown activity fields, actor is credential-bound")
