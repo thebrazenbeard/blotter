@@ -71,9 +71,10 @@ class RemoteBlotter:
             raise BlotterError("connection failed; write outcome may be unknown: reconcile using event_id") from exc
 
     def check(self, *, session: str = "default", after_seq: int = 0,
-              limit: int = 100) -> dict:
+              limit: int = 100, expected_after_hash: str | None = None) -> dict:
         return self._request("/v1/check", {
-            "session": session, "after_seq": after_seq, "limit": limit})
+            "session": session, "after_seq": after_seq, "limit": limit,
+            "expected_after_hash": expected_after_hash})
 
     def record(self, *, kind: str, message: str, session: str = "default",
                payload: dict | None = None, level: str = "INFO",
