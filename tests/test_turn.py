@@ -1,4 +1,4 @@
-import tempfile,threading,unittest
+import json,tempfile,threading,unittest
 from pathlib import Path
 from agent_blotter import Blotter, BlotterError
 from agent_blotter.remote import RemoteBlotter
@@ -55,10 +55,51 @@ class TurnTests(unittest.TestCase):
             url = "https://ledger.example"
             def check(self, **kwargs):
                 return {"events": [], "next_seq": 1, "has_more": False,
-                        "check_event": {"seq": 1}}
+                        "check_event": {"seq": 1}, "next_hash": "a" * 64}
         result = begin_turn(FakeClient(), self.state, session="safe")
         self.assertEqual(result["actor"], FakeClient.actor)
         self.assertFalse((self.state.parent / "outside.json").exists())
         self.assertEqual(len(list(self.state.glob("*.json"))), 1)
+
+    def test_same_url_replaced_ledger_rejects_old_cursor(self):
+        class Switch:
+            def __init__(self, current):
+                self.current = current
+            def check(self, **kwargs):
+                return self.current.check(**kwargs)
+        old = Blotter(Path(self.temp.name) / "old.sqlite3")
+        replacement = Blotter(Path(self.temp.name) / "replacement.sqlite3")
+        switch = Switch(old)
+        server = create_server(switch, {"A" * 40: "agent.one"}, port=0)
+        worker = threading.Thread(target=server.serve_forever,
+                                  kwargs={"poll_interval": 0.01}, daemon=True)
+        worker.start()
+        try:
+            client = RemoteBlotter(f"http://127.0.0.1:{server.server_port}",
+                                   actor="agent.one", token="A" * 40)
+            state = self.state / "cutover"
+            first = begin_turn(client, state, session="before")
+            self.assertEqual(first["cursor"], 1)
+            for i in range(3):
+                replacement.record(actor="agent.other", kind="test.executed",
+                                   message=f"Replacement {i}")
+            switch.current = replacement
+            with self.assertRaisesRegex(BlotterError, "history mismatch"):
+                begin_turn(client, state, session="after")
+            self.assertEqual(first["cursor"], 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=5)
+
+    def test_legacy_cursor_without_checkpoint_requires_reenrollment(self):
+        begin_turn(self.one, self.state, session="first")
+        saved_path = next(self.state.glob("*.json"))
+        saved = json.loads(saved_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(saved["cursor_hash"]), 64)
+        saved.pop("cursor_hash")
+        saved_path.write_text(json.dumps(saved), encoding="utf-8")
+        with self.assertRaisesRegex(BlotterError, "cursor belongs"):
+            begin_turn(self.one, self.state, session="second")
 
 if __name__=="__main__":unittest.main()
