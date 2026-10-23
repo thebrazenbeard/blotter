@@ -10,6 +10,16 @@ from typing import Any
 from .store import BlotterError, _valid_id
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward authenticated requests to a redirected URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect())
+
+
 class RemoteBlotter:
     """Connect a credential-bound agent to one shared Blotter server."""
 
@@ -45,7 +55,7 @@ class RemoteBlotter:
         req = urllib.request.Request(self.url + route, data=body, headers=headers,
                                      method="POST" if body is not None else "GET")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as reply:
+            with _NO_REDIRECT_OPENER.open(req, timeout=self.timeout) as reply:
                 return json.load(reply)
         except urllib.error.HTTPError as exc:
             try:
