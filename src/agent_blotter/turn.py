@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 from .remote import RemoteBlotter
-from .store import BlotterError, _valid_id
+from .store import BlotterError, GENESIS, _valid_id
 
 @contextlib.contextmanager
 def _exclusive_cursor(lock_path: Path):
@@ -47,41 +47,53 @@ def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: i
     path = folder / (cursor_key + ".json")
     with _exclusive_cursor(folder / (cursor_key + ".lock")):
         cursor = 0
+        cursor_hash = GENESIS
         if path.exists():
             saved = json.loads(path.read_text(encoding="utf-8"))
             if (not isinstance(saved, dict) or saved.get("url") != client.url
-                    or type(saved.get("cursor")) is not int or saved["cursor"] < 0):
+                    or type(saved.get("cursor")) is not int or saved["cursor"] < 0
+                    or not isinstance(saved.get("cursor_hash"), str)
+                    or len(saved["cursor_hash"]) != 64):
                 raise BlotterError("cursor belongs to another ledger or is invalid")
             cursor = saved["cursor"]
+            cursor_hash = saved["cursor_hash"]
         start = cursor
         seen = []
         pages = 0
         marker = None
         while True:
-            result = client.check(session=session, after_seq=cursor, limit=limit)
+            result = client.check(session=session, after_seq=cursor, limit=limit,
+                                  expected_after_hash=cursor_hash)
             pages += 1
             if pages > 10000: raise BlotterError("catch-up exceeded safe page limit")
             events = result["events"]
             next_seq = result["next_seq"]
+            next_hash = result.get("next_hash")
             if type(next_seq) is not int or next_seq <= cursor:
                 raise BlotterError("server did not advance the cursor")
             if any(type(e.get("seq")) is not int or e["seq"] <= cursor for e in events):
                 raise BlotterError("server returned invalid event sequence")
+            if (not isinstance(next_hash, str) or len(next_hash) != 64 or
+                    any(ch not in "0123456789abcdef" for ch in next_hash)):
+                raise BlotterError("server omitted valid cursor checkpoint hash")
             seen.extend(events)
             cursor = next_seq
+            cursor_hash = next_hash
             marker = result["check_event"]
             if not result["has_more"]: break
         fd, temp = tempfile.mkstemp(dir=str(folder), prefix=cursor_key+".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as out:
-                json.dump({"url":client.url,"cursor":cursor},out,separators=(",",":"))
+                json.dump({"url":client.url,"cursor":cursor,
+                           "cursor_hash":cursor_hash},out,separators=(",",":"))
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(temp, path)
         finally:
             if os.path.exists(temp): os.unlink(temp)
         return {"actor":actor,"session":session,"previous_cursor":start,
-                "cursor":cursor,"pages":pages,"events":seen,"check_event":marker}
+                "cursor":cursor,"cursor_hash":cursor_hash,
+                "pages":pages,"events":seen,"check_event":marker}
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="blotter-turn")
