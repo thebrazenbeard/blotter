@@ -215,7 +215,7 @@ class Blotter:
                 raise
 
     def check(self, *, actor: str, session: str = "default", after_seq: int = 0,
-              limit: int = 100) -> dict[str, Any]:
+              limit: int = 100, expected_after_hash: str | None = None) -> dict[str, Any]:
         """Inspect the shared activity since a cursor, recording this inspection.
 
         Reads a consistent pre-check cut while holding the writer transaction.
@@ -230,6 +230,15 @@ class Blotter:
                 latest = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
                 if after_seq > latest:
                     raise BlotterError("cursor is beyond this ledger head")
+                if expected_after_hash is not None:
+                    if (not isinstance(expected_after_hash, str) or
+                            not re.fullmatch(r"[0-9a-f]{64}", expected_after_hash)):
+                        raise BlotterError("invalid cursor checkpoint hash")
+                    prior = (GENESIS if after_seq == 0 else
+                             db.execute("SELECT hash FROM events WHERE seq=?",
+                                        (after_seq,)).fetchone()[0])
+                    if prior != expected_after_hash:
+                        raise BlotterError("cursor history mismatch; ledger was replaced or rewritten")
                 rows = db.execute(
                     "SELECT body FROM events WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?",
                     (after_seq, latest, limit + 1),
@@ -245,11 +254,14 @@ class Blotter:
                              "returned_count": len(events), "has_more": has_more},
                 )
                 check_event = self._append_locked(db, marker, None)
+                next_seq = last_seen if has_more else check_event["seq"]
+                next_hash = db.execute("SELECT hash FROM events WHERE seq=?",
+                                       (next_seq,)).fetchone()[0]
                 db.execute("COMMIT")
                 return {
                     "events": events, "has_more": has_more, "visible_head_seq": latest,
                     "check_event": check_event,
-                    "next_seq": last_seen if has_more else check_event["seq"],
+                    "next_seq": next_seq, "next_hash": next_hash,
                 }
             except BaseException:
                 db.execute("ROLLBACK")
