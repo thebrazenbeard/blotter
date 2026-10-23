@@ -6,6 +6,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent_blotter import Blotter, BlotterError
@@ -100,6 +101,70 @@ class ServerTests(unittest.TestCase):
         path.write_text(json.dumps({"agent.one": "short"}), encoding="utf-8")
         with self.assertRaises(BlotterError):
             load_credentials(path)
+
+    def test_reject_nonstring_event_enums(self):
+        for name in ("level", "evidence", "effect"):
+            with self.subTest(field=name):
+                payload = {"kind": "test.executed", "message": "invalid", name: 123}
+                req = urllib.request.Request(
+                    self.url + "/v1/record", method="POST",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Authorization": "Bearer " + self.token_a,
+                             "Content-Type": "application/json"})
+                with self.assertRaises(urllib.error.HTTPError) as exc:
+                    urllib.request.urlopen(req, timeout=3)
+                self.assertEqual(exc.exception.code, 422)
+                exc.exception.close()
+        self.assertEqual(self.store.verify()["count"], 0)
+
+    def test_direct_server_constructor_rejects_invalid_credentials(self):
+        for credentials in ({"short": "agent.one"},
+                            {"A" * 40: "agent.one", "B" * 40: "agent.one"},
+                            {"A" * 40: "invalid actor"},
+                            {"": "agent.one"}):
+            with self.subTest(credentials=credentials):
+                with self.assertRaises(BlotterError):
+                    create_server(self.store, credentials, port=0)
+
+    def test_authenticated_client_never_follows_redirect(self):
+        forwarded = []
+        class Target(BaseHTTPRequestHandler):
+            def do_GET(self):
+                forwarded.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.send_header("Content-Length", "13")
+                self.end_headers()
+                self.wfile.write(b'{"events":[]}')
+            def log_message(self, *args):
+                pass
+        target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+        target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+        target_thread.start()
+        class Redirect(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location",
+                                 f"http://127.0.0.1:{target.server_port}/capture")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            def log_message(self, *args):
+                pass
+        redirect = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+        redirect_thread = threading.Thread(target=redirect.serve_forever, daemon=True)
+        redirect_thread.start()
+        try:
+            client = RemoteBlotter(f"http://127.0.0.1:{redirect.server_port}",
+                                   actor="agent.one", token=self.token_a)
+            with self.assertRaises(BlotterError):
+                client.list()
+            self.assertEqual(forwarded, [])
+        finally:
+            redirect.shutdown()
+            redirect.server_close()
+            target.shutdown()
+            target.server_close()
+            redirect_thread.join(timeout=5)
+            target_thread.join(timeout=5)
 
 
 if __name__ == "__main__":
