@@ -112,4 +112,18 @@ class TurnTests(unittest.TestCase):
         self.assertEqual(self.db.verify()["count"], 0)
         self.assertEqual(len(list(self.state.glob("actor-*.json"))), 0)
 
+    def test_nested_legacy_cursor_is_detected_without_path_escape(self):
+        class NestedClient:
+            actor = "team/alpha"
+            url = "https://ledger.example"
+            def check(self, **kwargs):
+                raise AssertionError("must reject legacy cursor before contacting server")
+        old = self.state / "team" / "alpha.json"
+        old.parent.mkdir(parents=True, exist_ok=True)
+        old.write_text(json.dumps({"url": NestedClient.url, "cursor": 41}),
+                       encoding="utf-8")
+        with self.assertRaisesRegex(BlotterError, "legacy cursor detected"):
+            begin_turn(NestedClient(), self.state, session="legacy")
+        self.assertEqual(len(list(self.state.glob("actor-*.json"))), 0)
+
 if __name__=="__main__":unittest.main()
