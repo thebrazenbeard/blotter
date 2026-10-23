@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,8 +42,10 @@ def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: i
     actor = _valid_id(client.actor, "actor")
     folder = Path(state_dir)
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / (actor + ".json")
-    with _exclusive_cursor(folder / (actor + ".lock")):
+    # Actor identifiers can contain '/' and ':'. Never use them as paths.
+    cursor_key = "actor-" + hashlib.sha256(actor.encode("utf-8")).hexdigest()
+    path = folder / (cursor_key + ".json")
+    with _exclusive_cursor(folder / (cursor_key + ".lock")):
         cursor = 0
         if path.exists():
             saved = json.loads(path.read_text(encoding="utf-8"))
@@ -68,7 +71,7 @@ def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: i
             cursor = next_seq
             marker = result["check_event"]
             if not result["has_more"]: break
-        fd, temp = tempfile.mkstemp(dir=str(folder), prefix=actor+".", suffix=".tmp")
+        fd, temp = tempfile.mkstemp(dir=str(folder), prefix=cursor_key+".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as out:
                 json.dump({"url":client.url,"cursor":cursor},out,separators=(",",":"))
