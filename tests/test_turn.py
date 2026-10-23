@@ -56,7 +56,10 @@ class TurnTests(unittest.TestCase):
             def check(self, **kwargs):
                 return {"events": [], "next_seq": 1, "has_more": False,
                         "check_event": {"seq": 1}, "next_hash": "a" * 64}
-        result = begin_turn(FakeClient(), self.state, session="safe")
+        with self.assertRaisesRegex(BlotterError, "ambiguous legacy actor path"):
+            begin_turn(FakeClient(), self.state, session="safe")
+        result = begin_turn(FakeClient(), self.state, session="safe",
+                            re_enroll_legacy=True)
         self.assertEqual(result["actor"], FakeClient.actor)
         self.assertFalse((self.state.parent / "outside.json").exists())
         self.assertEqual(len(list(self.state.glob("*.json"))), 1)
@@ -152,5 +155,21 @@ class TurnTests(unittest.TestCase):
                 legacy.write_text('{"cursor":5}', encoding="utf-8")
                 with self.assertRaisesRegex(BlotterError, "legacy cursor detected"):
                     begin_turn(client, self.state, session="legacy")
+
+    def test_slash_ambiguity_requires_explicit_legacy_reenrollment(self):
+        class Fake:
+            url = "https://ledger.example"
+            def check(self, **kwargs):
+                return {"events": [], "next_seq": 1, "has_more": False,
+                        "check_event": {"seq": 1}, "next_hash": "b" * 64}
+        for actor in ("a//b", "a/", "a/./b", "a/../b"):
+            with self.subTest(actor=actor):
+                client = Fake()
+                client.actor = actor
+                with self.assertRaisesRegex(BlotterError, "ambiguous legacy actor path"):
+                    begin_turn(client, self.state, session="initial")
+                result = begin_turn(client, self.state, session="explicit",
+                                    re_enroll_legacy=True)
+                self.assertEqual(result["actor"], actor)
 
 if __name__=="__main__":unittest.main()
