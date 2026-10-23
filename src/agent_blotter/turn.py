@@ -36,7 +36,8 @@ def _exclusive_cursor(lock_path: Path):
             else:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
-def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: int = 100) -> dict:
+def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: int = 100,
+               re_enroll_legacy: bool = False) -> dict:
     """Read all unseen global events and persist an actor-specific cursor."""
     if not 2 <= limit <= 100: raise BlotterError("page limit must be 2..100")
     actor = _valid_id(client.actor, "actor")
@@ -49,11 +50,14 @@ def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: i
     # Inspect only literal, non-traversing path components. Never resolve
     # actor-provided "." or ".." segments or use a legacy path for writing.
     legacy_parts = actor.split("/")
-    if all(part not in ("", ".", "..") and
-           (os.name != "nt" or ":" not in part)
-           for part in legacy_parts):
+    legacy_path_safe = all(part not in ("", ".", "..") and
+                           (os.name != "nt" or ":" not in part)
+                           for part in legacy_parts)
+    if not path.exists() and not re_enroll_legacy:
+        if not legacy_path_safe:
+            raise BlotterError("ambiguous legacy actor path; deliberate re-enrollment required")
         old_path = folder.joinpath(*legacy_parts[:-1], legacy_parts[-1] + ".json")
-        if old_path.exists() and not path.exists():
+        if old_path.exists():
             raise BlotterError("legacy cursor detected; archive and deliberately re-enroll after reviewing history")
     with _exclusive_cursor(folder / (cursor_key + ".lock")):
         cursor = 0
@@ -115,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
     begin = sub.add_parser("begin")
     begin.add_argument("--session", required=True)
     begin.add_argument("--limit", type=int, default=100)
+    begin.add_argument("--re-enroll-legacy", action="store_true",
+                       help="explicitly reset a legacy actor cursor and reread full history")
     record = sub.add_parser("record")
     record.add_argument("--session", required=True)
     record.add_argument("--kind", required=True)
@@ -130,7 +136,8 @@ def main(argv: list[str] | None = None) -> int:
                  if args.token_file else os.environ.get("BLOTTER_TOKEN",""))
         client = RemoteBlotter(args.url,actor=args.actor,token=token)
         if args.command == "begin":
-            value = begin_turn(client,Path(args.state_dir),session=args.session,limit=args.limit)
+            value = begin_turn(client,Path(args.state_dir),session=args.session,
+                               limit=args.limit,re_enroll_legacy=args.re_enroll_legacy)
         else:
             value = client.record(session=args.session,kind=args.kind,
                                   message=args.message,evidence=args.evidence,
