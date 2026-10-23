@@ -136,6 +136,8 @@ class Blotter:
     ) -> dict[str, Any]:
         actor, kind, session = (_valid_id(actor, "actor"), _valid_id(kind, "kind"),
                                 _valid_id(session, "session"))
+        if not all(isinstance(item, str) for item in (level, evidence, effect)):
+            raise BlotterError("level, evidence and effect must be strings")
         level, evidence, effect = level.upper(), evidence.upper(), effect.upper()
         if level not in LEVELS or evidence not in EVIDENCE or effect not in EFFECTS:
             raise BlotterError("invalid level, evidence or effect")
