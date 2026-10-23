@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 from .remote import RemoteBlotter
@@ -45,6 +46,12 @@ def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: i
     # Actor identifiers can contain '/' and ':'. Never use them as paths.
     cursor_key = "actor-" + hashlib.sha256(actor.encode("utf-8")).hexdigest()
     path = folder / (cursor_key + ".json")
+    # Refuse silent replay of pre-hash actor.json state. Only inspect a
+    # validated single filename; never resolve actor-provided path segments.
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", actor):
+        old_path = folder / (actor + ".json")
+        if old_path.exists() and not path.exists():
+            raise BlotterError("legacy cursor detected; archive and deliberately re-enroll after reviewing history")
     with _exclusive_cursor(folder / (cursor_key + ".lock")):
         cursor = 0
         cursor_hash = GENESIS
