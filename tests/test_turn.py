@@ -49,4 +49,16 @@ class TurnTests(unittest.TestCase):
             with self.subTest(url=url),self.assertRaises(BlotterError):
                 RemoteBlotter(url,actor="agent.one",token="A"*40)
 
+    def test_actor_with_path_components_is_confined_to_cursor_directory(self):
+        class FakeClient:
+            actor = "a/../../outside"
+            url = "https://ledger.example"
+            def check(self, **kwargs):
+                return {"events": [], "next_seq": 1, "has_more": False,
+                        "check_event": {"seq": 1}}
+        result = begin_turn(FakeClient(), self.state, session="safe")
+        self.assertEqual(result["actor"], FakeClient.actor)
+        self.assertFalse((self.state.parent / "outside.json").exists())
+        self.assertEqual(len(list(self.state.glob("*.json"))), 1)
+
 if __name__=="__main__":unittest.main()
