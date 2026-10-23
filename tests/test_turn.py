@@ -126,4 +126,16 @@ class TurnTests(unittest.TestCase):
             begin_turn(NestedClient(), self.state, session="legacy")
         self.assertEqual(len(list(self.state.glob("actor-*.json"))), 0)
 
+    def test_at_sign_legacy_actor_is_detected(self):
+        class AtClient:
+            actor = "agent@one"
+            url = "https://ledger.example"
+            def check(self, **kwargs):
+                raise AssertionError("must reject before server check")
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / "agent@one.json").write_text(
+            json.dumps({"url": AtClient.url, "cursor": 4}), encoding="utf-8")
+        with self.assertRaisesRegex(BlotterError, "legacy cursor detected"):
+            begin_turn(AtClient(), self.state, session="legacy")
+
 if __name__=="__main__":unittest.main()
