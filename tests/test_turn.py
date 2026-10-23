@@ -138,4 +138,19 @@ class TurnTests(unittest.TestCase):
         with self.assertRaisesRegex(BlotterError, "legacy cursor detected"):
             begin_turn(AtClient(), self.state, session="legacy")
 
+    def test_punctuation_prefixed_nested_legacy_cursors_are_detected(self):
+        for actor in ("team/.hidden", "team/_node", "team/-node", "team/@node"):
+            with self.subTest(actor=actor):
+                class LegacyClient:
+                    url = "https://ledger.example"
+                    def check(self, **kwargs):
+                        raise AssertionError("must not silently replay")
+                client = LegacyClient()
+                client.actor = actor
+                legacy = self.state / "team" / (actor.split("/")[-1] + ".json")
+                legacy.parent.mkdir(parents=True, exist_ok=True)
+                legacy.write_text('{"cursor":5}', encoding="utf-8")
+                with self.assertRaisesRegex(BlotterError, "legacy cursor detected"):
+                    begin_turn(client, self.state, session="legacy")
+
 if __name__=="__main__":unittest.main()
