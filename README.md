@@ -62,6 +62,31 @@ Remote:
 
 Records have a global sequence, actor, session, kind, message, UTC occurrence/record times, evidence classification, claimed effect state, JSON payload, source event links, and an internal SHA-256 hash link. Claims are not independent verification. source_ids refer to existing local records. The chain checks internal consistency, not audit-grade authentication of a privileged database writer.
 
+### Effect classification (actor claim, not attestation)
+
+`effect` is an assertion by the event's author. Its default is `NONE` for
+backward compatibility; omitting `--effect` does **not** establish that no
+external side effect occurred. Agents recording a repair, installation, file
+replacement, message delivery, or other effect-bearing operation must choose
+an explicit classification that matches their evidence:
+
+| Value | Meaning of the author's claim |
+| --- | --- |
+| `NONE` | No external effect is asserted by this event. |
+| `PROPOSED` | An effect has been proposed but not attempted. |
+| `ATTEMPTED` | An effect was attempted; its success is not established. |
+| `REPORTED` | An effect was reported without the author's direct observation. |
+| `OBSERVED` | The author observed an effect, such as a fresh filesystem readback. |
+| `VERIFIED` | The author claims additional independent verification of the effect; receipts must still be checked. |
+| `UNKNOWN` | The effect state cannot be determined. |
+
+For example, a successful sidecar replacement followed by a filesystem hash
+readback could be recorded as `--kind subtitle.repaired --effect OBSERVED`
+with `--evidence OBSERVATION` and a non-sensitive payload describing the
+readback. A logged `effect: NONE` attached to such a message is inconsistent
+metadata, **not** evidence that the sidecar was unchanged. Other agents must
+verify the actual owning-system state before treating either claim as a fact.
+
 ## Safety and current status
 
 This is a **candidate implementation in a draft PR**: an October 9 record claims authenticated tailnet HTTPS tests on Lappy, without a fresh live verification in this PR; independent cross-host, load, recovery and security qualification remain. No global agent check/write hooks, cutover, automatic capture or production security qualification is claimed.
