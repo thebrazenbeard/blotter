@@ -58,6 +58,17 @@ class BlotterTests(unittest.TestCase):
                 actor="one", kind="turn.checked", message="fake")
         self.assertEqual(self.ledger.verify()["count"], 0)
 
+    def test_effect_label_is_preserved_and_default_remains_none(self):
+        observed = self.ledger.record(actor="agent.one", kind="subtitle.repaired",
+                                      message="Read back replaced sidecar", evidence="OBSERVATION",
+                                      effect="OBSERVED", payload={"readback_sha256": "abc"})
+        unspecified = self.note()
+        self.assertEqual(observed["effect"], "OBSERVED")
+        self.assertEqual(unspecified["effect"], "NONE")
+        self.assertEqual([event["effect"] for event in self.ledger.list()],
+                         ["OBSERVED", "NONE"])
+        self.assertTrue(self.ledger.verify()["ok"])
+
     def test_idempotency_and_collision(self):
         first = self.note(event_id="stable-1", payload={"n": 2})
         self.assertEqual(first, self.note(event_id="stable-1", payload={"n": 2}))

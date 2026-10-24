@@ -8,6 +8,24 @@ from pathlib import Path
 
 
 class CLITests(unittest.TestCase):
+    def test_explicit_effect_survives_cli_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "blotter.sqlite3"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+            base = [sys.executable, "-m", "agent_blotter", "--db", str(path)]
+            action = subprocess.run(base + ["record", "--actor", "agent.one",
+                                            "--kind", "subtitle.repaired",
+                                            "--message", "Read back changed sidecar",
+                                            "--evidence", "OBSERVATION", "--effect", "OBSERVED"],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(action.returncode, 0, action.stderr)
+            event = json.loads(action.stdout)
+            self.assertEqual(event["effect"], "OBSERVED")
+            readback = subprocess.run(base + ["list"], env=env, capture_output=True, text=True)
+            self.assertEqual(readback.returncode, 0, readback.stderr)
+            self.assertEqual(json.loads(readback.stdout)[0]["effect"], "OBSERVED")
+
     def test_workflow(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "blotter.sqlite3"
