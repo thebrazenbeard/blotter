@@ -90,13 +90,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "export":
             if not args.url:
                 for line in ledger.export(after_seq=args.after_seq):
-                    print(line)
+                    print(json.dumps(json.loads(line), ensure_ascii=True,
+                                     sort_keys=True, separators=(",", ":")))
             else:
                 cursor = args.after_seq
                 while True:
                     batch = ledger.list(after_seq=cursor, limit=100)
                     for item in batch:
-                        print(json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                        print(json.dumps(item, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
                     if not batch:
                         break
                     new_cursor = batch[-1]["seq"]
@@ -109,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             parser.error("unknown command")
             return 2
-        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        print(json.dumps(result, ensure_ascii=True, sort_keys=True))
         return 0
     except (BlotterError, IntegrityError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"blotter: {exc}", file=sys.stderr)
