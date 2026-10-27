@@ -69,7 +69,7 @@ Records have a global sequence, actor, session, kind, message, UTC occurrence/re
 
 ## Safety and current status
 
-This is a **candidate implementation in a draft PR**: an October 9 record claims authenticated tailnet HTTPS tests on Lappy, without a fresh live verification in this PR; independent cross-host, load, recovery and security qualification remain. No global agent check/write hooks, cutover, automatic capture or production security qualification is claimed.
+The Blotter source is **merged into `main` and covered by Linux/Windows CI**. An October 9 record reports authenticated tailnet HTTPS tests on Lappy, but that historic report is not a fresh runtime probe. Current Lappy deployment, independent cross-host behavior, load, recovery, and production security qualification remain unverified. No global agent check/write hooks, cutover, or automatic capture is claimed.
 
 The HTTP server requires per-agent bearer tokens and refuses non-loopback binding without TLS. Do not put credentials or personal secrets into records. Sensitive JSON field-name redaction is best effort; the message and arbitrary values are not scanned. A record never grants execution/merge/provider authority. No unsolicited telemetry.
 
