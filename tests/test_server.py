@@ -60,6 +60,39 @@ class ServerTests(unittest.TestCase):
         self.assertEqual([e["seq"] for e in self.one.list()], list(range(1, 6)))
         self.assertEqual(self.store.verify()["count"], 5)
 
+    def test_remote_client_does_not_silently_coerce_invalid_empty_fields(self):
+        # Invalid falsey caller values must be rejected, not rewritten into
+        # different valid events before admission.
+        for fields in ({"payload": []}, {"payload": 0}, {"payload": ""},
+                       {"source_ids": 0}, {"source_ids": ""}):
+            with self.subTest(fields=fields), self.assertRaises(BlotterError):
+                self.one.record(kind="tool.executed", message="invalid", **fields)
+        self.assertEqual(self.store.verify()["count"], 0)
+
+        valid = self.one.record(kind="tool.executed", message="valid",
+                                payload={}, source_ids=[])
+        self.assertEqual(valid["payload"], {})
+        self.assertEqual(valid["source_ids"], [])
+
+    def test_raw_http_source_ids_must_be_json_array(self):
+        for invalid in ({}, ""):
+            with self.subTest(source_ids=invalid):
+                body = json.dumps({"kind": "tool.executed", "message": "bad lineage",
+                                   "source_ids": invalid}).encode("utf-8")
+                request = urllib.request.Request(
+                    self.url + "/v1/record", data=body, method="POST",
+                    headers={"Authorization": "Bearer " + self.token_a,
+                             "Content-Type": "application/json"})
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(request, timeout=3)
+                self.assertEqual(caught.exception.code, 422)
+                caught.exception.close()
+        self.assertEqual(self.store.verify()["count"], 0)
+
+        event = self.one.record(kind="tool.executed", message="valid lineage",
+                                source_ids=[])
+        self.assertEqual(event["source_ids"], [])
+
     def test_server_identity_is_credential_bound(self):
         wrong = RemoteBlotter(self.url, actor="agent.other", token="X" * 40)
         with self.assertRaises(BlotterError):

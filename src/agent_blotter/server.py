@@ -215,6 +215,8 @@ def create_server(
                         raise BlotterError("unknown activity fields, actor is credential-bound")
                     if "kind" not in obj or "message" not in obj:
                         raise BlotterError("kind and message required")
+                    if "source_ids" in obj and not isinstance(obj["source_ids"], list):
+                        raise BlotterError("source_ids must be a JSON array")
                     result = ledger.record(actor=actor, **obj)
                 self._send(200, result)
             except (BlotterError, ValueError, TypeError, UnicodeError) as exc:
