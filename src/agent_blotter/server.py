@@ -8,6 +8,7 @@ import argparse
 import hmac
 import ipaddress
 import json
+import math
 import os
 import ssl
 import stat
@@ -19,6 +20,7 @@ from .store import Blotter, BlotterError, SCHEMA_VERSION, _valid_id
 
 MAX_HTTP_BODY = 70000
 MAX_HTTP_PAGE = 100
+DEFAULT_REQUEST_TIMEOUT = 15.0
 WRITE_FIELDS = frozenset(("kind", "message", "session", "level", "evidence",
                           "effect", "payload", "source_ids", "event_id",
                           "correlation_id", "occurred_at"))
@@ -55,6 +57,7 @@ def load_credentials(path: str | Path) -> dict[str, str]:
 def create_server(
     ledger: Blotter, credentials: dict[str, str], host: str = "127.0.0.1",
     port: int = 8832, *, certfile: str | None = None, keyfile: str | None = None,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> ThreadingHTTPServer:
     """Create a bound service. Non-loopback binds require server TLS."""
     if not isinstance(credentials, dict) or not credentials:
@@ -77,10 +80,18 @@ def create_server(
         raise BlotterError("non-loopback HTTP without TLS is forbidden")
     if type(port) is not int or not 0 <= port <= 65535:
         raise BlotterError("invalid server port")
+    if (type(request_timeout) not in (int, float) or
+            not math.isfinite(request_timeout) or not 0 < request_timeout <= 120):
+        raise BlotterError("request timeout must be finite and 0-120 seconds")
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "AgentBlotter/0.2"
+
+        def setup(self) -> None:
+            super().setup()
+            # Bound time spent waiting for headers/body on an idle connection.
+            self.connection.settimeout(request_timeout)
 
         def log_message(self, fmt, *args):
             # Do not print tokens or raw client data from HTTP requests.
@@ -94,12 +105,15 @@ def create_server(
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            if self.close_connection:
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(payload)
 
         def _actor(self) -> str | None:
             header = self.headers.get("Authorization", "")
             if not header.startswith("Bearer "):
+                self.close_connection = True
                 self._send(401, {"error": "authentication required"})
                 return None
             supplied = header[7:]
@@ -107,20 +121,26 @@ def create_server(
                 if hmac.compare_digest(supplied, token):
                     expected = self.headers.get("X-Blotter-Actor")
                     if expected is not None and expected != actor:
+                        self.close_connection = True
                         self._send(403, {"error": "credential identity mismatch"})
                         return None
                     return actor
+            self.close_connection = True
             self._send(403, {"error": "invalid credentials"})
             return None
 
         def _body(self) -> dict:
+            if self.headers.get("Transfer-Encoding") is not None:
+                raise BlotterError("Transfer-Encoding is unsupported")
+            if len(self.headers.get_all("Content-Length", [])) != 1:
+                raise BlotterError("exactly one Content-Length is required")
             rawlen = self.headers.get("Content-Length")
             if rawlen is None or not rawlen.isdigit():
                 raise BlotterError("valid Content-Length required")
             length = int(rawlen)
             if not 1 <= length <= MAX_HTTP_BODY:
                 raise BlotterError("request body out of bounds")
-            if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
+            if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                 raise BlotterError("Content-Type must be application/json")
             value = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(value, dict):
@@ -133,6 +153,8 @@ def create_server(
                 return
             route = urlsplit(self.path).path
             if route not in ("/v1/check", "/v1/record"):
+                # The body has not been consumed; never parse it as a new request.
+                self.close_connection = True
                 self._send(404, {"error": "route not found"})
                 return
             try:
@@ -154,13 +176,23 @@ def create_server(
                     result = ledger.record(actor=actor, **obj)
                 self._send(200, result)
             except (BlotterError, ValueError, TypeError, UnicodeError) as exc:
+                self.close_connection = True
                 self._send(422, {"error": str(exc)})
             except OSError:
+                self.close_connection = True
                 self._send(503, {"error": "ledger temporarily unavailable"})
 
         def do_GET(self) -> None:
             actor = self._actor()
             if actor is None:
+                return
+            lengths = self.headers.get_all("Content-Length", [])
+            if (self.headers.get("Transfer-Encoding") is not None or
+                    len(lengths) > 1 or (lengths and lengths[0] != "0")):
+                # GET does not read bodies; reject and close rather than allowing
+                # unread bytes to become the next HTTP request line.
+                self.close_connection = True
+                self._send(422, {"error": "GET request bodies are unsupported"})
                 return
             parts = urlsplit(self.path)
             if parts.path == "/v1/health":
@@ -209,12 +241,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8832)
     parser.add_argument("--tls-cert")
     parser.add_argument("--tls-key")
+    parser.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT,
+                        help="maximum idle seconds while reading each HTTP request (default 15)")
     args = parser.parse_args(argv)
     try:
         ledger = Blotter(args.db)
         credentials = load_credentials(args.credentials)
         server = create_server(ledger, credentials, host=args.host, port=args.port,
-                               certfile=args.tls_cert, keyfile=args.tls_key)
+                               certfile=args.tls_cert, keyfile=args.tls_key,
+                               request_timeout=args.request_timeout)
         print(f"Blotter ledger listening on {args.host}:{args.port}", flush=True)
         try:
             server.serve_forever(poll_interval=0.1)
