@@ -5,7 +5,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import sys
 from uuid import uuid4
 
 from .mcp_stdio import _load_token_file, _validate_config_url
@@ -22,11 +21,13 @@ def _failure_code(exc: Exception, phase: str) -> str:
     if "server rejected request (401)" in message:
         return "AUTHENTICATION_FAILED"
     if "server rejected request (403)" in message:
+        if "invalid credentials" in message:
+            return "AUTHENTICATION_FAILED"
         return "IDENTITY_OR_PERMISSION_REJECTED"
     if "server rejected request (404)" in message:
         return "TAIL_ENDPOINT_MISSING" if phase == "latest20_read" else "API_ENDPOINT_MISSING"
     if "server rejected request (422)" in message:
-        return "REQUEST_REJECTED"
+        return "CURSOR_CONFLICT" if "history mismatch" in message or "cursor" in message else "REQUEST_REJECTED"
     if "server rejected request (503)" in message:
         return "SERVICE_UNAVAILABLE"
     if "connection failed" in message or "outcome may be unknown" in message:
@@ -39,9 +40,9 @@ def _failure_code(exc: Exception, phase: str) -> str:
 def diagnose(client: RemoteBlotter, *, test_append: bool = False) -> dict:
     """Probe authenticated health and recent-read endpoints without mutation.
 
-    A record is written only when test_append=True. That event uses a stable ID
-    for the duration of this invocation and is read back by sequence/event ID.
-    A timed-out write is never retried automatically.
+    A record is written only when test_append=True. The event ID is included in
+    the report and is used for exact read-after-write verification. A write
+    without a receipt is never retried automatically.
     """
     report = {
         "ok": False,
@@ -113,24 +114,24 @@ def diagnose(client: RemoteBlotter, *, test_append: bool = False) -> dict:
                 "reconcile this event ID against the ledger.")
         else:
             seq = written.get("seq") if isinstance(written, dict) else None
-            report["writes_confirmed"] = 1
-            if type(seq) is not int or seq < 1:
+            if type(seq) is not int or seq < 1 or written.get("id") != event_id:
                 report["checks"]["append_test"] = {
                     "status": "verification_failed", "code": "INVALID_APPEND_RECEIPT",
                     "event_id": event_id}
-                report["diagnosis"] = "The append response lacked a valid sequence receipt."
+                report["diagnosis"] = "The append response lacked the expected event ID and sequence receipt."
             else:
                 try:
                     events = client.list(after_seq=seq - 1, limit=100)
                     found = any(
                         isinstance(event, dict)
-                        and event.get("event_id") == event_id
+                        and event.get("id") == event_id
                         and event.get("seq") == seq
                         for event in events
                     )
                 except Exception:
                     found = False
                 if found:
+                    report["writes_confirmed"] = 1
                     report["checks"]["append_test"] = {
                         "status": "passed", "event_id": event_id, "seq": seq}
                 else:
@@ -185,7 +186,6 @@ def main(argv: list[str] | None = None) -> int:
         token = _load_token_file(Path(args.token_file))
         client = RemoteBlotter(url, actor=actor, token=token)
     except (BlotterError, OSError, ValueError):
-        # Do not echo private paths, token contents or raw configuration errors.
         print(json.dumps({
             "ok": False,
             "checks": {"configuration": {"status": "failed", "code": "CONFIGURATION_INVALID"}},
