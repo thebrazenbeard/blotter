@@ -27,6 +27,33 @@ WRITE_FIELDS = frozenset(("kind", "message", "session", "level", "evidence",
 READ_FIELDS = frozenset(("after_seq", "limit", "actor", "kind", "session"))
 
 
+class _BlotterHTTPServer(ThreadingHTTPServer):
+    """Perform optional TLS handshakes inside client workers, not accept().
+
+    Wrapping a listening socket makes SSLSocket.accept() negotiate TLS before
+    ThreadingMixIn starts a worker. One silent peer could then block every
+    subsequent connection for the handshake timeout interval.
+    """
+
+    tls_context: ssl.SSLContext | None = None
+    tls_handshake_timeout: float = DEFAULT_REQUEST_TIMEOUT
+
+    def finish_request(self, request, client_address) -> None:
+        if self.tls_context is None:
+            super().finish_request(request, client_address)
+            return
+        request.settimeout(self.tls_handshake_timeout)
+        try:
+            tls_request = self.tls_context.wrap_socket(request, server_side=True)
+        except OSError:
+            # Failed handshakes are unauthenticated connection failures.
+            return
+        try:
+            super().finish_request(tls_request, client_address)
+        finally:
+            tls_request.close()
+
+
 def load_credentials(path: str | Path) -> dict[str, str]:
     """Return token -> actor mapping from an owner-protected JSON file.
 
@@ -111,7 +138,17 @@ def create_server(
             self.wfile.write(payload)
 
         def _actor(self) -> str | None:
-            header = self.headers.get("Authorization", "")
+            authorization = self.headers.get_all("Authorization", [])
+            if len(authorization) != 1:
+                self.close_connection = True
+                self._send(401, {"error": "exactly one Authorization header required"})
+                return None
+            declared_actors = self.headers.get_all("X-Blotter-Actor", [])
+            if len(declared_actors) > 1:
+                self.close_connection = True
+                self._send(403, {"error": "ambiguous credential identity"})
+                return None
+            header = authorization[0]
             if not header.startswith("Bearer "):
                 self.close_connection = True
                 self._send(401, {"error": "authentication required"})
@@ -119,7 +156,7 @@ def create_server(
             supplied = header[7:]
             for token, actor in credentials.items():
                 if hmac.compare_digest(supplied, token):
-                    expected = self.headers.get("X-Blotter-Actor")
+                    expected = declared_actors[0] if declared_actors else None
                     if expected is not None and expected != actor:
                         self.close_connection = True
                         self._send(403, {"error": "credential identity mismatch"})
@@ -140,9 +177,14 @@ def create_server(
             length = int(rawlen)
             if not 1 <= length <= MAX_HTTP_BODY:
                 raise BlotterError("request body out of bounds")
-            if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+            content_types = self.headers.get_all("Content-Type", [])
+            if (len(content_types) != 1 or
+                    content_types[0].split(";", 1)[0].strip().lower() != "application/json"):
                 raise BlotterError("Content-Type must be application/json")
-            value = json.loads(self.rfile.read(length).decode("utf-8"))
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise BlotterError("incomplete request body")
+            value = json.loads(raw.decode("utf-8"))
             if not isinstance(value, dict):
                 raise BlotterError("request body must be a JSON object")
             return value
@@ -217,14 +259,15 @@ def create_server(
             except OSError:
                 self._send(503, {"error": "ledger temporarily unavailable"})
 
-    result = ThreadingHTTPServer((host, port), Handler)
+    result = _BlotterHTTPServer((host, port), Handler)
     result.daemon_threads = True
     if certfile:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         try:
             context.load_cert_chain(certfile=certfile, keyfile=keyfile)
-            result.socket = context.wrap_socket(result.socket, server_side=True)
+            result.tls_context = context
+            result.tls_handshake_timeout = request_timeout
         except BaseException:
             result.server_close()
             raise
