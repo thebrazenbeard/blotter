@@ -57,7 +57,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(result["writes_confirmed"], 1)
         events = self.client.list(after_seq=append["seq"] - 1, limit=100)
         self.assertTrue(any(
-            item.get("event_id") == append["event_id"] and item.get("seq") == append["seq"]
+            item.get("id") == append["event_id"] and item.get("seq") == append["seq"]
             for item in events
         ))
         self.assertEqual(self.ledger.verify()["count"], 1)
@@ -121,6 +121,14 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("/v1/tail", missing_tail)
         self.assertIn("HTTP 404", missing_tail)
         self.assertNotIn(secret, missing_tail)
+
+        invalid_token = _safe_tool_failure(
+            BlotterError("server rejected request (403): invalid credentials"), "latest20")
+        self.assertIn("authentication failed", invalid_token.lower())
+
+        identity_mismatch = _safe_tool_failure(
+            BlotterError("server rejected request (403): credential identity mismatch"), "latest20")
+        self.assertIn("identity", identity_mismatch.lower())
 
         auth = _safe_tool_failure(
             BlotterError(f"server rejected request (401): {secret}"), "latest20")
