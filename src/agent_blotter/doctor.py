@@ -30,6 +30,8 @@ def _failure_code(exc: Exception, phase: str) -> str:
         return "CURSOR_CONFLICT" if "history mismatch" in message or "cursor" in message else "REQUEST_REJECTED"
     if "server rejected request (503)" in message:
         return "SERVICE_UNAVAILABLE"
+    if "hostname resolution failed" in message or "dns resolution failed" in message:
+        return "NETWORK_DNS_FAILURE"
     if "connection failed" in message or "outcome may be unknown" in message:
         return "CONNECTION_FAILED"
     if isinstance(exc, BlotterError):
@@ -61,6 +63,10 @@ def diagnose(client: RemoteBlotter, *, test_append: bool = False) -> dict:
         report["checks"]["authenticated_health"] = {
             "status": "failed", "code": _failure_code(exc, "authenticated_health")}
         report["diagnosis"] = "The authenticated health request did not succeed."
+        if report["checks"]["authenticated_health"]["code"] == "NETWORK_DNS_FAILURE":
+            report["diagnosis"] = (
+                "The Blotter hostname did not resolve. Check that this host is connected to "
+                "the authorized private network and that its DNS client is active; no write was attempted.")
         return report
 
     if not isinstance(health, dict) or health.get("ok") is not True:
