@@ -1,5 +1,6 @@
 """Regression tests for actionable, read-only Blotter diagnostics."""
 import json
+import socket
 import tempfile
 import threading
 import unittest
@@ -8,7 +9,7 @@ from unittest import mock
 import urllib.error
 
 from agent_blotter import Blotter, BlotterError
-from agent_blotter.doctor import diagnose
+from agent_blotter.doctor import _failure_code, diagnose
 from agent_blotter.mcp_stdio import _safe_tool_failure
 from agent_blotter.remote import RemoteBlotter
 from agent_blotter.server import create_server
@@ -89,6 +90,28 @@ class DoctorTests(unittest.TestCase):
             result["checks"]["authenticated_health"]["code"], "AUTHENTICATION_FAILED")
         rendered = json.dumps(result)
         self.assertNotIn("wrong-token", rendered)
+        self.assertEqual(self.ledger.verify()["count"], 0)
+
+    def test_dns_failure_is_distinct_and_not_an_ambiguous_write(self):
+        failure = urllib.error.URLError(socket.gaierror("private DNS detail"))
+        with mock.patch("agent_blotter.remote._NO_REDIRECT_OPENER.open",
+                        side_effect=failure):
+            with self.assertRaises(BlotterError) as read_error:
+                self.client.health()
+        self.assertIn("hostname resolution failed", str(read_error.exception))
+        self.assertNotIn("private DNS detail", str(read_error.exception))
+        self.assertNotIn("write outcome may be unknown", str(read_error.exception))
+        self.assertEqual(_failure_code(read_error.exception, "authenticated_health"),
+                         "NETWORK_DNS_FAILURE")
+
+        failure = urllib.error.URLError(socket.gaierror("private DNS detail"))
+        with mock.patch("agent_blotter.remote._NO_REDIRECT_OPENER.open",
+                        side_effect=failure):
+            with self.assertRaises(BlotterError) as write_error:
+                self.client.record(kind="diagnostic.probe", message="probe",
+                                   event_id="dns-failure-test")
+        self.assertIn("hostname resolution failed", str(write_error.exception))
+        self.assertNotIn("write outcome may be unknown", str(write_error.exception))
         self.assertEqual(self.ledger.verify()["count"], 0)
 
     def test_read_transport_failure_does_not_claim_write_outcome_unknown(self):
