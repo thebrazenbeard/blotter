@@ -61,14 +61,25 @@ class RemoteBlotter:
             try:
                 try:
                     reason = json.loads(exc.read().decode("utf-8")).get("error", "request rejected")
-                except (ValueError, UnicodeError):
+                except (ValueError, UnicodeError, AttributeError):
                     reason = "request rejected"
             finally:
                 exc.close()
             raise BlotterError(f"server rejected request ({exc.code}): {reason}") from exc
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-            # POST effect is ambiguous on disconnect. The caller must reconcile by ID.
-            raise BlotterError("connection failed; write outcome may be unknown: reconcile using event_id") from exc
+            # A failed POST can have committed even when its response was lost.
+            # A failed GET is read-only and has no ambiguous write outcome.
+            if body is not None:
+                raise BlotterError(
+                    "connection failed; write outcome may be unknown: reconcile using event_id"
+                ) from exc
+            raise BlotterError(
+                "connection failed before a response; no read result was verified"
+            ) from exc
+
+    def health(self) -> dict:
+        """Authenticated, read-only health check of the configured service."""
+        return self._request("/v1/health")
 
     def check(self, *, session: str = "default", after_seq: int = 0,
               limit: int = 100, expected_after_hash: str | None = None) -> dict:
@@ -101,4 +112,3 @@ class RemoteBlotter:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise BlotterError("tail limit must be 1-100")
         return self._request("/v1/tail?" + urllib.parse.urlencode({"limit": limit}))["events"]
-
