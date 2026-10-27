@@ -15,6 +15,7 @@ keywords = ["agents", "logging", "sqlite", "provenance", "audit"]
 blotter = "agent_blotter.cli:main"
 blotter-serve = "agent_blotter.server:main"
 blotter-turn = "agent_blotter.turn:main"
+blotter-probe = "agent_blotter.probe:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
