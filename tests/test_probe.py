@@ -39,15 +39,21 @@ class ProbeTests(unittest.TestCase):
     def invoke(self, *argv, env=None):
         stream = io.StringIO()
         # Keep proxy bypass and system SSL environment intact; only erase
-        # Blotter defaults to exercise explicit client configuration.
+        # Blotter defaults to exercise explicit client configuration. Windows
+        # does not accept --token-file without DACL verification, so exercise
+        # its supported process-scoped token path instead.
+        defaults = {"BLOTTER_URL": "", "BLOTTER_TOKEN": self.token if os.name == "nt" else ""}
         with contextlib.redirect_stdout(stream), mock.patch.dict(
-                os.environ, {"BLOTTER_URL": "", "BLOTTER_TOKEN": "", **(env or {})}):
+                os.environ, {**defaults, **(env or {})}):
             code = main(list(argv))
         return code, json.loads(stream.getvalue())
 
+    def auth_args(self):
+        return (("--token-file", str(self.secret_file))
+                if os.name == "posix" else ())
+
     def args(self):
-        return ("--url", self.url, "--actor", "probe.agent",
-                "--token-file", str(self.secret_file))
+        return ("--url", self.url, "--actor", "probe.agent", *self.auth_args())
 
     def test_missing_configuration_does_not_create_local_ledger(self):
         home = Path(self.tmp.name) / "untouched-home"
@@ -69,8 +75,10 @@ class ProbeTests(unittest.TestCase):
         self.assertNotIn(self.token, json.dumps(result))
 
     def test_bad_token_is_distinct_and_never_appends(self):
-        self.secret_file.write_text("X" * 40, encoding="utf-8")
-        code, result = self.invoke(*self.args())
+        if os.name == "posix":
+            self.secret_file.write_text("X" * 40, encoding="utf-8")
+        code, result = self.invoke(*self.args(),
+                                   env={"BLOTTER_TOKEN": "X" * 40} if os.name == "nt" else None)
         self.assertEqual(code, 2)
         self.assertEqual(result["status"], "AUTHORIZATION_FAILED")
         self.assertEqual(self.store.verify()["count"], 0)
@@ -96,14 +104,14 @@ class ProbeTests(unittest.TestCase):
 
     def test_wrong_bound_actor_fails_closed(self):
         args = ("--url", self.url, "--actor", "wrong.actor",
-                "--token-file", str(self.secret_file))
+                *self.auth_args())
         code, result = self.invoke(*args)
         self.assertEqual(code, 2)
         self.assertEqual(result["status"], "AUTHORIZATION_FAILED")
 
     def test_unreachable_port_is_not_reported_as_auth_failure(self):
         args = ("--url", "http://127.0.0.1:1", "--actor", "probe.agent",
-                "--token-file", str(self.secret_file), "--timeout", "0.25")
+                *self.auth_args(), "--timeout", "0.25")
         code, result = self.invoke(*args)
         self.assertEqual(code, 2)
         self.assertEqual(result["status"], "CONNECTIVITY_FAILED")
