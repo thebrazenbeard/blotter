@@ -38,6 +38,28 @@ class CLITests(unittest.TestCase):
             self.assertNotEqual(run("record", "--actor", "a", "--kind", "x",
                                     "--message", "m", "--payload", "badjson").returncode, 0)
 
+    def test_local_cli_emits_ascii_safe_json_on_cp1252_console(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.sqlite3"
+            env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"),
+                       PYTHONIOENCODING="cp1252:strict")
+            command = [sys.executable, "-m", "agent_blotter", "--db", str(path)]
+            def run(*args):
+                return subprocess.run([*command, *args], env=env,
+                                      capture_output=True, timeout=10)
+            first = run("record", "--actor", "agent.one", "--kind", "test.executed",
+                        "--message", "A → B and 漢字")
+            self.assertEqual(first.returncode, 0, first.stderr)
+            for args in (("list",), ("export",), ("check", "--actor", "agent.two")):
+                with self.subTest(args=args):
+                    value = run(*args)
+                    self.assertEqual(value.returncode, 0, value.stderr)
+                    self.assertTrue(all(c < 128 for c in value.stdout))
+                    payload = json.loads(value.stdout.decode("ascii"))
+                    events = (payload["events"] if isinstance(payload, dict) and "events" in payload
+                              else [payload] if isinstance(payload, dict) else payload)
+                    self.assertIn("A → B and 漢字", [event["message"] for event in events])
+
 
 if __name__ == "__main__":
     unittest.main()
