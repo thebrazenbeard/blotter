@@ -21,6 +21,17 @@ Loopback mode is suitable for local agents or a secure pre-existing tunnel. To b
 
 Non-loopback plaintext HTTP is rejected by design. Choose network restrictions, credential issuance/rotation, monitoring, backup, service restart policy and an approved trust model before production use. This code does not itself install an operating system service; see the bounded Lappy deployment runbook for the current private runtime. Tokens load on startup; restart after rotation.
 
+The HTTP handler enforces a 15-second socket idle timeout (configurable with
+`--request-timeout SECONDS`, limited to 120 seconds), rejects duplicate
+`Content-Length` and `Transfer-Encoding` request bodies, and closes the
+connection after authentication or malformed-body failures. Unknown POST
+routes and GETs with request bodies also close before unread bytes can be
+parsed as another request. These safeguards
+reduce stale HTTP connections and ambiguous framing; they **do not** establish
+resistance to high-volume connection floods, unbounded concurrent request
+threads, or stalled TLS handshakes. Keep the service behind a restricted
+private-network ingress and qualify resource-exhaustion behavior separately.
+
 ## Client — one service for all agents
 
 Set BLOTTER_URL to the same server address for every agent and BLOTTER_TOKEN to each **agent's own** issued token. Do not store these in the repository or pass them on CLI arguments. Use the stable token-associated actor ID.

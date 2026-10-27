@@ -1,6 +1,7 @@
 import concurrent.futures
 import json
 import os
+import socket
 import tempfile
 import threading
 import unittest
@@ -72,6 +73,93 @@ class ServerTests(unittest.TestCase):
         with self.assertRaises(BlotterError):
             misbound.record(kind="tool.executed", message="wrong identity")
         self.assertEqual(self.store.verify()["count"], 0)
+
+    def test_duplicate_content_length_is_rejected_without_writing(self):
+        body = b'{"kind":"tool.executed","message":"ambiguous framing"}'
+        with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2) as conn:
+            conn.settimeout(2)
+            request = (
+                b"POST /v1/record HTTP/1.1\r\nHost: localhost\r\n"
+                + b"Authorization: Bearer " + self.token_a.encode("ascii") + b"\r\n"
+                + b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+            )
+            conn.sendall(request)
+            response = conn.recv(4096)
+        self.assertIn(b" 422 ", response)
+        self.assertEqual(self.store.verify()["count"], 0)
+
+    def test_transfer_encoding_is_rejected_without_writing(self):
+        body = b'{"kind":"tool.executed","message":"should not record"}'
+        with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2) as conn:
+            conn.settimeout(2)
+            conn.sendall(
+                b"POST /v1/record HTTP/1.1\r\nHost: localhost\r\n"
+                + b"Authorization: Bearer " + self.token_a.encode("ascii") + b"\r\n"
+                + b"Content-Type: application/json\r\n"
+                + b"Transfer-Encoding: chunked\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+            )
+            self.assertIn(b" 422 ", conn.recv(4096))
+        self.assertEqual(self.store.verify()["count"], 0)
+
+    def test_unknown_post_route_closes_unread_body(self):
+        with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2) as conn:
+            conn.settimeout(2)
+            auth = b"Authorization: Bearer " + self.token_a.encode("ascii") + b"\r\n"
+            conn.sendall(
+                b"POST /absent HTTP/1.1\r\nHost: localhost\r\n" + auth
+                + b"Content-Length: 4\r\n\r\nxxxx"
+                + b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n" + auth + b"\r\n"
+            )
+            received = bytearray()
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                received.extend(chunk)
+        self.assertIn(b" 404 ", received)
+        self.assertIn(b"Connection: close", received)
+        self.assertNotIn(b" 501 ", received)
+
+    def test_get_with_body_rejected_and_connection_closed(self):
+        with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2) as conn:
+            conn.settimeout(2)
+            conn.sendall(
+                b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n"
+                + b"Authorization: Bearer " + self.token_a.encode("ascii") + b"\r\n"
+                + b"Content-Length: 4\r\n\r\nxxxx"
+            )
+            received = bytearray()
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                received.extend(chunk)
+        self.assertIn(b" 422 ", received)
+        self.assertIn(b"Connection: close", received)
+
+    def test_invalid_request_timeouts_fail_before_binding(self):
+        for value in (0, -1, 121, True, float("nan"), float("inf"), "15"):
+            with self.subTest(timeout=value):
+                with self.assertRaises(BlotterError):
+                    create_server(self.store, self.tokens, port=0, request_timeout=value)
+
+    def test_unfinished_http_headers_release_connection(self):
+        server = create_server(self.store, self.tokens, port=0, request_timeout=0.15)
+        worker = threading.Thread(target=server.serve_forever,
+                                  kwargs={"poll_interval": 0.01}, daemon=True)
+        worker.start()
+        try:
+            with socket.create_connection(("127.0.0.1", server.server_port), timeout=2) as conn:
+                conn.settimeout(2)
+                conn.sendall(b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n")
+                self.assertEqual(conn.recv(1), b"")
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
 
     def test_central_concurrent_writes_and_retry(self):
         def log(i):
