@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -66,9 +67,31 @@ class RemoteBlotter:
             finally:
                 exc.close()
             raise BlotterError(f"server rejected request ({exc.code}): {reason}") from exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-            # A failed POST can have committed even when its response was lost.
-            # A failed GET is read-only and has no ambiguous write outcome.
+        except urllib.error.URLError as exc:
+            # DNS failure proves the request never reached the server, so even a
+            # POST cannot have committed. Do not report a false ambiguous write.
+            reason = exc.reason
+            reason_text = str(reason).lower()
+            dns_failure = (
+                isinstance(reason, socket.gaierror)
+                or (isinstance(reason, OSError) and
+                    getattr(reason, "winerror", None) in (11001, 11002, 11003))
+                or "getaddrinfo failed" in reason_text
+                or "name or service not known" in reason_text
+                or "no such host is known" in reason_text
+            )
+            if dns_failure:
+                raise BlotterError(
+                    "Blotter hostname resolution failed; verify private-network DNS/Tailscale connectivity"
+                ) from exc
+            if body is not None:
+                raise BlotterError(
+                    "connection failed; write outcome may be unknown: reconcile using event_id"
+                ) from exc
+            raise BlotterError(
+                "connection failed before a response; no read result was verified"
+            ) from exc
+        except (TimeoutError, ConnectionError, OSError) as exc:
             if body is not None:
                 raise BlotterError(
                     "connection failed; write outcome may be unknown: reconcile using event_id"
