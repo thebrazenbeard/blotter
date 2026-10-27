@@ -12,7 +12,9 @@ blotter-doctor --actor bt2.one --token-file PRIVATE_AGENT_TOKEN_FILE
 
 The token file must remain private. Its contents, path, and server response bodies are never included in the JSON report. The command checks the authenticated `/v1/health` route and then reads at most one event from `/v1/tail`. It does not use `/v1/check`, append a `turn.checked` marker, change the durable turn cursor, or scan history as a fallback.
 
-The report uses stable codes to distinguish configuration failure, authentication failure, identity/permission rejection, connection failure, service unavailability, and a missing `/v1/tail` endpoint. A successful health result with `TAIL_ENDPOINT_MISSING` means the service answered and authenticated, but its deployed API does not provide the required recent-history route.
+The report uses stable codes to distinguish configuration failure, authentication failure, identity/permission rejection, connection failure, service unavailability, DNS resolution failure, and a missing `/v1/tail` endpoint. `NETWORK_DNS_FAILURE` means the hostname could not be resolved at all; on a tailnet-only hostname, check that the host is enrolled in the authorized private network and that its DNS client is active. A successful health result with `TAIL_ENDPOINT_MISSING` means the service answered and authenticated, but its deployed API does not provide the required recent-history route.
+
+A DNS failure is known to occur before an HTTP request reaches the service, so a DNS-failed append is not classified as an ambiguous write. A connection timeout after request transmission remains potentially ambiguous and must be reconciled by the original event ID.
 
 ## Explicit append verification
 
