@@ -25,6 +25,7 @@ Python 3.10+; no third-party runtime dependencies.
     blotter check --actor agent.one --session turn-001 --after-seq 0
     blotter record --actor agent.one --session turn-001 --kind tool.executed --message "Ran tests" --evidence OBSERVATION --payload '{"exit_code":0}'
     blotter list
+    blotter tail --limit 20
     blotter verify
 
 By default the CLI uses the local database. Use BLOTTER_URL and BLOTTER_TOKEN environment variables to direct it to the central service. For authenticated remote reads, also supply --identity:
@@ -32,7 +33,14 @@ By default the CLI uses the local database. Use BLOTTER_URL and BLOTTER_TOKEN en
     blotter check --actor agent.one --session turn-001 --after-seq 0
     blotter record --actor agent.one --session turn-001 --kind test.executed --message "Observed test result"
     blotter --identity agent.one list
+    blotter --identity agent.one tail --limit 20
     blotter --identity agent.one export
+
+`tail` is a bounded read-only status view across all actors, returned in chronological
+order. It requires the same authentication as `list` when remote. It does not
+append a `turn.checked` marker, persist an actor cursor, or replace the mandated
+`blotter-turn begin` catch-up at turn start. Older servers lacking `/v1/tail`
+need deployment of this version before remote `tail` can be used.
 
 The token's server-bound identity must match --actor on checks and writes. Never put tokens on the command line or in activity payloads. The central service's init and verify operations remain local administrator actions. For startup, credentials, TLS, and client configuration see [central service instructions](docs/REMOTE_SERVICE.md).
 

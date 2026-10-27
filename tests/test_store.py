@@ -115,6 +115,17 @@ class BlotterTests(unittest.TestCase):
         self.assertEqual([e["seq"] for e in other.list(after_seq=2, limit=2)], [3, 4])
         self.assertEqual(other.verify()["count"], 5)
 
+    def test_tail_is_bounded_global_chronological_read_without_write(self):
+        self.assertEqual(self.ledger.tail(limit=20), [])
+        for i in range(25):
+            self.note(actor="one" if i % 2 else "two", event_id=f"tail-{i}")
+        self.assertEqual([e["seq"] for e in self.ledger.tail(limit=20)], list(range(6, 26)))
+        self.assertEqual([e["seq"] for e in self.ledger.tail(limit=1)], [25])
+        self.assertEqual(self.ledger.verify()["count"], 25)
+        for invalid in (0, -1, 101, True, 1.0, "20"):
+            with self.subTest(invalid=invalid), self.assertRaises(BlotterError):
+                self.ledger.tail(limit=invalid)
+
 
 if __name__ == "__main__":
     unittest.main()

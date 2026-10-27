@@ -96,3 +96,9 @@ class RemoteBlotter:
         query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         return self._request("/v1/events?" + query)["events"]
 
+    def tail(self, *, limit: int = 20) -> list[dict]:
+        """Authenticated recent global history view (not a turn check)."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise BlotterError("tail limit must be 1-100")
+        return self._request("/v1/tail?" + urllib.parse.urlencode({"limit": limit}))["events"]
+
