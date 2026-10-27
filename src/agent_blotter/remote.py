@@ -90,10 +90,13 @@ class RemoteBlotter:
                evidence: str = "UNKNOWN", effect: str = "NONE",
                source_ids: list[str] | None = None, event_id: str | None = None,
                correlation_id: str | None = None, occurred_at: str | None = None) -> dict:
+        if source_ids is not None and not isinstance(source_ids, list):
+            raise BlotterError("source_ids must be a list")
         return self._request("/v1/record", {
-            "kind": kind, "message": message, "session": session, "payload": payload or {},
+            "kind": kind, "message": message, "session": session,
+            "payload": {} if payload is None else payload,
             "level": level, "evidence": evidence, "effect": effect,
-            "source_ids": source_ids or [], "event_id": event_id,
+            "source_ids": [] if source_ids is None else source_ids, "event_id": event_id,
             "correlation_id": correlation_id, "occurred_at": occurred_at,
         })
 
