@@ -126,6 +126,61 @@ def _success(identifier: Any, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": identifier, "result": result}
 
 
+def _safe_tool_failure(exc: BlotterError, tool_name: str) -> str:
+    """Map service failures to actionable, secret-free messages.
+
+    Remote response bodies may contain untrusted text. Only known HTTP status
+    codes and local error classes cross the MCP boundary; raw errors never do.
+    """
+    message = str(exc).lower()
+    if "server rejected request (401)" in message:
+        return ("Blotter authentication failed (HTTP 401). Check private credential "
+                "provisioning; do not paste or log the token.")
+    if "server rejected request (403)" in message:
+        return ("Blotter rejected the credential identity or permission (HTTP 403). "
+                "Verify the configured actor matches the server-bound token.")
+    if "server rejected request (404)" in message:
+        if tool_name == "latest20":
+            return ("Blotter's required /v1/tail endpoint is missing (HTTP 404). "
+                    "The deployed server may be an older version; no history-scan fallback was attempted.")
+        return ("The configured Blotter API route was not found (HTTP 404). "
+                "Check the service base path and deployed API version.")
+    if "server rejected request (422)" in message:
+        return ("Blotter rejected the request (HTTP 422). Check API compatibility, arguments, "
+                "or the saved cursor; no automatic cursor reset was attempted.")
+    if "server rejected request (503)" in message:
+        return "Blotter reports temporary service unavailability (HTTP 503). No success was verified."
+    if "tail capability not installed" in message:
+        return ("This local adapter lacks the required /v1/tail client capability. "
+                "Update the adapter; no history scan was attempted.")
+    if "connection failed" in message or "outcome may be unknown" in message:
+        if tool_name == "record_activity":
+            return ("Blotter did not confirm this append. The outcome may be unknown; "
+                    "reconcile using the same event_id before any retry, never a new ID.")
+        if tool_name == "begin_turn":
+            return ("Blotter catch-up did not return a complete result. A check marker may have "
+                    "been written, but cursor completion was not confirmed; do not claim the turn check succeeded.")
+        return ("Blotter did not return a read response. No read success was verified; "
+                "check service reachability before retrying.")
+    if tool_name == "record_activity":
+        return ("Blotter rejected the append or could not confirm it. Reconcile against the ledger "
+                "using the same event_id before retrying.")
+    if tool_name == "begin_turn":
+        return ("Blotter catch-up did not complete. Do not claim the check succeeded or reset the cursor automatically.")
+    return ("Blotter request failed; no success was verified. Use blotter-doctor to distinguish "
+            "connectivity, authentication, and endpoint-version failures.")
+
+
+def _safe_io_failure(tool_name: str) -> str:
+    if tool_name == "record_activity":
+        return ("Blotter append could not be confirmed. If the request reached the service, its outcome "
+                "may be unknown; reconcile using the same event_id before retrying.")
+    if tool_name == "begin_turn":
+        return ("Blotter catch-up could not complete its local I/O. Do not claim the check succeeded; "
+                "inspect cursor state before retrying.")
+    return "Blotter read failed during I/O. No successful read result was verified."
+
+
 def _validate_properties(values: Any, required: set[str], allowed: set[str]) -> dict:
     if not isinstance(values, dict) or not required <= set(values) or set(values) - allowed:
         raise ValueError("missing or unexpected tool arguments")
@@ -301,18 +356,16 @@ class BlotterMCP:
             return _error(identifier, -32602, "Unknown Blotter tool")
         try:
             value = functions[name](params["arguments"])
-        except (ValueError, TypeError, KeyError, BlotterError) as exc:
-            # Invalid model arguments are protocol errors. Never stringify a
-            # remote exception into a tool result: it might contain secrets.
-            if not isinstance(exc, BlotterError):
-                return _error(identifier, -32602, "Invalid tool arguments")
+        except (ValueError, TypeError, KeyError) as exc:
+            # Invalid model arguments are protocol errors; exception text can
+            # contain untrusted input and is not returned.
+            return _error(identifier, -32602, "Invalid tool arguments")
+        except BlotterError as exc:
             return _success(identifier, {"content": [{"type": "text",
-                "text": "Blotter unavailable or request rejected. For uncertain writes, reconcile by event_id."}],
-                "isError": True})
+                "text": _safe_tool_failure(exc, name)}], "isError": True})
         except (OSError, ConnectionError, TimeoutError):
             return _success(identifier, {"content": [{"type": "text",
-                "text": "Blotter transport unavailable; if a write timed out, reconcile by event_id."}],
-                "isError": True})
+                "text": _safe_io_failure(name)}], "isError": True})
         return _success(identifier, {"content": [{"type": "text",
                             "text": json.dumps(value, ensure_ascii=True, sort_keys=True)}],
                             "isError": False})
