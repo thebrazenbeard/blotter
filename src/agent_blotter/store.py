@@ -40,6 +40,10 @@ def _utc(value: str | None) -> str:
         return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
     if not isinstance(value, str):
         raise BlotterError("occurred_at must be an ISO 8601 string")
+    # datetime.fromisoformat silently discards digits beyond microseconds.
+    # Reject unsupported precision instead of changing the claimed event time.
+    if re.search(r"[.,]\d{7}", value):
+        raise BlotterError("occurred_at supports at most six fractional digits")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:

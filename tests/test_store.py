@@ -88,6 +88,19 @@ class BlotterTests(unittest.TestCase):
             self.ledger.list(limit=0)
         self.assertEqual(self.ledger.verify()["count"], 0)
 
+    def test_timestamp_precision_is_not_silently_truncated(self):
+        for timestamp in (
+            "2026-10-27T01:02:03.0000001Z",
+            "2026-10-27T01:02:03.0000009+00:00",
+            "2026-10-27T03:02:03,123456789+02:00",
+        ):
+            with self.subTest(timestamp=timestamp), self.assertRaises(BlotterError):
+                self.note(occurred_at=timestamp)
+        self.assertEqual(self.ledger.verify()["count"], 0)
+        accepted = self.note(occurred_at="2026-10-27T03:02:03.123456+02:00")
+        self.assertEqual(accepted["occurred_at"], "2026-10-27T01:02:03.123456Z")
+        self.assertEqual(self.ledger.verify()["count"], 1)
+
     def test_modified_chain_detected(self):
         self.note()
         self.note()
