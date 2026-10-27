@@ -1,14 +1,19 @@
 import concurrent.futures
 import json
 import os
+import shutil
 import socket
+import ssl
+import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from agent_blotter import Blotter, BlotterError
 from agent_blotter.remote import RemoteBlotter
@@ -90,6 +95,68 @@ class ServerTests(unittest.TestCase):
         self.assertIn(b" 422 ", response)
         self.assertEqual(self.store.verify()["count"], 0)
 
+    def test_short_content_length_body_is_rejected_without_writing(self):
+        # The supplied JSON is complete, but the declared HTTP message body is
+        # longer. EOF must not turn a truncated transport into a valid write.
+        body = b'{"kind":"tool.executed","message":"complete JSON, short HTTP body"}'
+        with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2) as conn:
+            conn.settimeout(2)
+            conn.sendall(
+                b"POST /v1/record HTTP/1.1\r\nHost: localhost\r\n"
+                + b"Authorization: Bearer " + self.token_a.encode("ascii") + b"\r\n"
+                + b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(body) + 4}\r\n\r\n".encode("ascii") + body
+            )
+            conn.shutdown(socket.SHUT_WR)
+            response = conn.recv(4096)
+        self.assertIn(b" 422 ", response)
+        self.assertEqual(self.store.verify()["count"], 0)
+
+    def test_duplicate_authorization_headers_are_rejected_without_writing(self):
+        # Header order must never choose an identity behind an intermediary's
+        # back when two Authorization values are present.
+        body = b'{"kind":"tool.executed","message":"ambiguous identity"}'
+        with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2) as conn:
+            conn.settimeout(2)
+            conn.sendall(
+                b"POST /v1/record HTTP/1.1\r\nHost: localhost\r\n"
+                + b"Authorization: Bearer " + self.token_a.encode("ascii") + b"\r\n"
+                + b"Authorization: Bearer " + self.token_b.encode("ascii") + b"\r\n"
+                + b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+            )
+            response = conn.recv(4096)
+        self.assertIn(b" 401 ", response)
+        self.assertEqual(self.store.verify()["count"], 0)
+
+    def test_duplicate_declared_actor_is_rejected(self):
+        with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2) as conn:
+            conn.settimeout(2)
+            conn.sendall(
+                b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n"
+                + b"Authorization: Bearer " + self.token_a.encode("ascii") + b"\r\n"
+                + b"X-Blotter-Actor: agent.one\r\n"
+                + b"X-Blotter-Actor: agent.two\r\n\r\n"
+            )
+            response = conn.recv(4096)
+        self.assertIn(b" 403 ", response)
+        self.assertEqual(self.store.verify()["count"], 0)
+
+    def test_duplicate_content_type_is_rejected_without_writing(self):
+        body = b'{"kind":"tool.executed","message":"ambiguous media type"}'
+        with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2) as conn:
+            conn.settimeout(2)
+            conn.sendall(
+                b"POST /v1/record HTTP/1.1\r\nHost: localhost\r\n"
+                + b"Authorization: Bearer " + self.token_a.encode("ascii") + b"\r\n"
+                + b"Content-Type: application/json\r\n"
+                + b"Content-Type: text/plain\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+            )
+            response = conn.recv(4096)
+        self.assertIn(b" 422 ", response)
+        self.assertEqual(self.store.verify()["count"], 0)
+
     def test_transfer_encoding_is_rejected_without_writing(self):
         body = b'{"kind":"tool.executed","message":"should not record"}'
         with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2) as conn:
@@ -160,6 +227,84 @@ class ServerTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             worker.join(timeout=2)
+
+    def test_slow_tls_handshake_does_not_block_other_clients(self):
+        """TLS work must occur per accepted client, never on the accept loop."""
+        entered = threading.Event()
+        release = threading.Event()
+        accepted = []
+
+        def simulated_handshake(sock, *, server_side):
+            self.assertTrue(server_side)
+            # A listening socket must never be wrapped/handshaken here.
+            self.assertEqual(sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN), 0)
+            accepted.append(sock)
+            if len(accepted) == 1:
+                entered.set()
+                release.wait(timeout=2)
+            return sock
+
+        with mock.patch("agent_blotter.server.ssl.SSLContext") as tls:
+            tls.return_value.wrap_socket.side_effect = simulated_handshake
+            server = create_server(self.store, self.tokens, port=0,
+                                   certfile="unused-test-cert", keyfile="unused-test-key")
+            worker = threading.Thread(target=server.serve_forever,
+                                      kwargs={"poll_interval": 0.01}, daemon=True)
+            worker.start()
+            try:
+                with socket.create_connection(("127.0.0.1", server.server_port), timeout=2):
+                    self.assertTrue(entered.wait(1), "the first handshake was not accepted")
+                    with socket.create_connection(("127.0.0.1", server.server_port), timeout=2) as second:
+                        second.settimeout(1)
+                        second.sendall(
+                            b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n"
+                            + b"Authorization: Bearer " + self.token_a.encode("ascii")
+                            + b"\r\nConnection: close\r\n\r\n"
+                        )
+                        self.assertIn(b" 200 ", second.recv(4096))
+            finally:
+                release.set()
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl executable required for local TLS fixture")
+    def test_actual_tls_client_works_while_unauthenticated_peer_is_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cert = Path(tmp) / "test-cert.pem"
+            key = Path(tmp) / "test-key.pem"
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                 "-keyout", str(key), "-out", str(cert), "-days", "1",
+                 "-subj", "/CN=localhost"],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            server = create_server(self.store, self.tokens, port=0,
+                                   certfile=str(cert), keyfile=str(key),
+                                   request_timeout=2)
+            worker = threading.Thread(target=server.serve_forever,
+                                      kwargs={"poll_interval": 0.01}, daemon=True)
+            worker.start()
+            try:
+                with socket.create_connection(("127.0.0.1", server.server_port), timeout=2):
+                    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    start = time.monotonic()
+                    with socket.create_connection(("127.0.0.1", server.server_port), timeout=1) as raw:
+                        raw.settimeout(1)
+                        with context.wrap_socket(raw, server_hostname="localhost") as active:
+                            active.sendall(
+                                b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n"
+                                + b"Authorization: Bearer " + self.token_a.encode("ascii")
+                                + b"\r\nConnection: close\r\n\r\n"
+                            )
+                            self.assertIn(b" 200 ", active.recv(4096))
+                    self.assertLess(time.monotonic() - start, 1.5)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
 
     def test_central_concurrent_writes_and_retry(self):
         def log(i):

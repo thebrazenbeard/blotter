@@ -27,10 +27,12 @@ The HTTP handler enforces a 15-second socket idle timeout (configurable with
 connection after authentication or malformed-body failures. Unknown POST
 routes and GETs with request bodies also close before unread bytes can be
 parsed as another request. These safeguards
-reduce stale HTTP connections and ambiguous framing; they **do not** establish
-resistance to high-volume connection floods, unbounded concurrent request
-threads, or stalled TLS handshakes. Keep the service behind a restricted
-private-network ingress and qualify resource-exhaustion behavior separately.
+reduce stale HTTP connections and ambiguous framing. TLS negotiation runs
+inside each accepted client's worker, with the same idle socket timeout, so a
+silent handshake cannot monopolize the server's accept loop. This does **not**
+establish resistance to high-volume connection floods, slow byte-by-byte
+trickles, or unbounded concurrent request threads. Keep the service behind a
+restricted private-network ingress and qualify resource exhaustion separately.
 
 ## Client — one service for all agents
 
