@@ -126,6 +126,63 @@ def _success(identifier: Any, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": identifier, "result": result}
 
 
+def _safe_tool_failure(exc: BlotterError, tool_name: str) -> str:
+    """Map service failures to actionable, secret-free messages."""
+    message = str(exc).lower()
+    if "server rejected request (401)" in message:
+        return ("Blotter authentication failed (HTTP 401). Check private credential "
+                "provisioning; do not paste or log the token.")
+    if "server rejected request (403)" in message:
+        if "invalid credentials" in message:
+            return ("Blotter authentication failed (HTTP 403). Check private credential "
+                    "provisioning; do not paste or log the token.")
+        return ("Blotter rejected the credential identity or permission (HTTP 403). "
+                "Verify the configured actor matches the server-bound token.")
+    if "server rejected request (404)" in message:
+        if tool_name == "latest20":
+            return ("Blotter's required /v1/tail endpoint is missing (HTTP 404). "
+                    "The deployed server may be an older version; no history-scan fallback was attempted.")
+        return ("The configured Blotter API route was not found (HTTP 404). "
+                "Check the service base path and deployed API version.")
+    if "server rejected request (422)" in message:
+        if "history mismatch" in message or "cursor" in message:
+            return ("Blotter rejected the saved cursor/history checkpoint (HTTP 422). "
+                    "Do not reset the cursor automatically; reconcile ledger identity and hash.")
+        return ("Blotter rejected the request (HTTP 422). Check API compatibility or arguments; "
+                "no automatic cursor reset was attempted.")
+    if "server rejected request (503)" in message:
+        return "Blotter reports temporary service unavailability (HTTP 503). No success was verified."
+    if "tail capability not installed" in message:
+        return ("This local adapter lacks the required /v1/tail client capability. "
+                "Update the adapter; no history scan was attempted.")
+    if "connection failed" in message or "outcome may be unknown" in message:
+        if tool_name == "record_activity":
+            return ("Blotter did not confirm this append. The outcome may be unknown; "
+                    "reconcile using the same event_id before any retry, never a new ID.")
+        if tool_name == "begin_turn":
+            return ("Blotter catch-up did not return a complete result. A check marker may have "
+                    "been written, but cursor completion was not confirmed; do not claim the turn check succeeded.")
+        return ("Blotter did not return a read response. No read success was verified; "
+                "check service reachability before retrying.")
+    if tool_name == "record_activity":
+        return ("Blotter rejected the append or could not confirm it. Reconcile against the ledger "
+                "using the same event_id before retrying.")
+    if tool_name == "begin_turn":
+        return ("Blotter catch-up did not complete. Do not claim the check succeeded or reset the cursor automatically.")
+    return ("Blotter request failed; no success was verified. Use blotter-doctor to distinguish "
+            "connectivity, authentication, and endpoint-version failures.")
+
+
+def _safe_io_failure(tool_name: str) -> str:
+    if tool_name == "record_activity":
+        return ("Blotter append could not be confirmed. If the request reached the service, its outcome "
+                "may be unknown; reconcile using the same event_id before retrying.")
+    if tool_name == "begin_turn":
+        return ("Blotter catch-up could not complete its local I/O. Do not claim the check succeeded; "
+                "inspect cursor state before retrying.")
+    return "Blotter read failed during I/O. No successful read result was verified."
+
+
 def _validate_properties(values: Any, required: set[str], allowed: set[str]) -> dict:
     if not isinstance(values, dict) or not required <= set(values) or set(values) - allowed:
         raise ValueError("missing or unexpected tool arguments")
@@ -156,8 +213,6 @@ class _BoundedCheckClient:
         if self.pages >= MAX_BEGIN_PAGES or time.monotonic() - self.started >= MAX_BEGIN_SECONDS:
             raise BlotterError("turn backlog exceeds safe page/time budget; cursor unchanged")
         result = self.client.check(**kwargs)
-        # Count the exact JSON representation later embedded in the MCP result.
-        # Reserve >200 KB for cursor metadata and the final check-event marker.
         try:
             encoded_size = len(json.dumps(result["events"], ensure_ascii=True,
                                           sort_keys=True).encode("utf-8"))
@@ -167,8 +222,6 @@ class _BoundedCheckClient:
         self.bytes += encoded_size
         if (self.bytes > MAX_BEGIN_BYTES or self.pages > MAX_BEGIN_PAGES or
                 time.monotonic() - self.started >= MAX_BEGIN_SECONDS):
-            # begin_turn saves the cursor only AFTER its loop finishes. Raising
-            # here retains the previous cursor for a later complete replay.
             raise BlotterError("turn backlog exceeds safe byte/time budget; cursor unchanged")
         return result
 
@@ -202,16 +255,12 @@ class BlotterMCP:
         if type(limit) is not int or not 2 <= limit <= 100:
             raise ValueError("limit must be 2..100")
         self._limit_calls("begin_turn")
-        # Legacy-cursor re-enrollment is intentionally not exposed to models.
         return begin_turn(_BoundedCheckClient(self.client), self.state_dir,
                           session=args["session"], limit=limit)
 
     def _latest20(self, args: dict) -> dict:
         _validate_properties(args, set(), set())
         self._limit_calls("latest20")
-        # This endpoint is supplied by the independently reviewed Blotter PR7.
-        # Do not silently scan all historical records or return a partial tail
-        # if an older server has not yet been upgraded.
         tail = getattr(self.client, "tail", None)
         if not callable(tail):
             raise BlotterError("Blotter /v1/tail capability not installed")
@@ -301,18 +350,16 @@ class BlotterMCP:
             return _error(identifier, -32602, "Unknown Blotter tool")
         try:
             value = functions[name](params["arguments"])
-        except (ValueError, TypeError, KeyError, BlotterError) as exc:
-            # Invalid model arguments are protocol errors. Never stringify a
-            # remote exception into a tool result: it might contain secrets.
-            if not isinstance(exc, BlotterError):
-                return _error(identifier, -32602, "Invalid tool arguments")
+        except BlotterError as exc:
+            # Known operation/service failures become actionable but secret-free
+            # tool results. Never return untrusted server response text.
             return _success(identifier, {"content": [{"type": "text",
-                "text": "Blotter unavailable or request rejected. For uncertain writes, reconcile by event_id."}],
-                "isError": True})
+                "text": _safe_tool_failure(exc, name)}], "isError": True})
+        except (ValueError, TypeError, KeyError):
+            return _error(identifier, -32602, "Invalid tool arguments")
         except (OSError, ConnectionError, TimeoutError):
             return _success(identifier, {"content": [{"type": "text",
-                "text": "Blotter transport unavailable; if a write timed out, reconcile by event_id."}],
-                "isError": True})
+                "text": _safe_io_failure(name)}], "isError": True})
         return _success(identifier, {"content": [{"type": "text",
                             "text": json.dumps(value, ensure_ascii=True, sort_keys=True)}],
                             "isError": False})
@@ -323,7 +370,6 @@ class BlotterMCP:
             if not line:
                 return
             if len(line) > MAX_INPUT_BYTES:
-                # Drain one oversized message in bounded chunks; never parse it.
                 while line and not line.endswith(b"\n"):
                     line = incoming.readline(MAX_INPUT_BYTES + 1)
                 reply = _error(None, -32700, "MCP input too large")
@@ -359,7 +405,6 @@ def main(argv: list[str] | None = None) -> int:
         BlotterMCP(client, Path(args.state_dir)).serve(sys.stdin.buffer, sys.stdout.buffer)
         return 0
     except (BlotterError, OSError, ValueError):
-        # Keep token contents, private paths, and remote error data off logs.
         print("blotter-mcp: private configuration invalid or unavailable", file=sys.stderr)
         return 2
 

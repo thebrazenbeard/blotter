@@ -37,6 +37,23 @@ third-party runtime dependencies. Clients negotiating a different version
 receive the supported version. Modern hosts that cannot fall back to this
 classic handshake may need an additional compatibility layer.
 
+## Failure reporting
+
+MCP tool errors now distinguish common deployment failures without returning
+raw server response text or credentials:
+
+- `HTTP 401`: authentication failed; verify private credential provisioning.
+- `HTTP 403`: server rejected the token's bound actor or its permissions.
+- `HTTP 404` on `latest20`: the deployed service lacks `/v1/tail`; no history-scan fallback is attempted.
+- `HTTP 422`: request/API compatibility or cursor state was rejected; the adapter does not silently reset the cursor.
+- Read transport failure: no read result was verified.
+- Append transport failure: outcome may be unknown; reconcile using the **same** `event_id` before retrying.
+
+Use [Blotter diagnostics](DIAGNOSTICS.md) and `blotter-doctor` to separate
+authenticated service health from recent-history endpoint availability. The
+default probe is read-only. An append/read-back probe requires the explicit
+`--test-append` flag.
+
 ## Security and evidence limits
 
 - On Unix, the token file must not be group/world-readable. On Windows, a
