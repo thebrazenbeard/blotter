@@ -1,9 +1,10 @@
-import json,tempfile,threading,unittest
+import contextlib,io,json,os,tempfile,threading,unittest
 from pathlib import Path
+from unittest import mock
 from agent_blotter import Blotter, BlotterError
 from agent_blotter.remote import RemoteBlotter
 from agent_blotter.server import create_server
-from agent_blotter.turn import begin_turn
+from agent_blotter.turn import begin_turn, main as turn_main
 
 class TurnTests(unittest.TestCase):
     def setUp(self):
@@ -172,4 +173,127 @@ class TurnTests(unittest.TestCase):
                                     re_enroll_legacy=True)
                 self.assertEqual(result["actor"], actor)
 
-if __name__=="__main__":unittest.main()
+class TurnCliCredentialTests(unittest.TestCase):
+    """Mock the remote transport: NEVER call /v1/check on a live server."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.token_file = Path(self.temp.name) / "agent.token"
+        self.token_file.write_text("T" * 40, encoding="utf-8")
+        if os.name == "posix":
+            self.token_file.chmod(0o600)
+        self.url = "https://lappy.tail86ea75.ts.net/blotter"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def invoke(self, *args, environ=None):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        values = {"BLOTTER_URL": self.url, "BLOTTER_TOKEN": "", **(environ or {})}
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
+                mock.patch.dict(os.environ, values), \
+                mock.patch("agent_blotter.turn.RemoteBlotter") as factory:
+            factory.return_value.record.return_value = {"ok": True}
+            result = turn_main(list(args))
+        return result, stdout.getvalue(), stderr.getvalue(), factory
+
+    def record_args(self):
+        return ("--actor", "agent.vn2", "--token-file", str(self.token_file),
+                "record", "--session", "testing", "--kind", "test.executed",
+                "--message", "local mocked test")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX private token file")
+    def test_safe_file_uses_direct_transport_only(self):
+        rc, out, err, factory = self.invoke(*self.record_args())
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out), {"ok": True})
+        factory.assert_called_once_with(
+            self.url, actor="agent.vn2", token="T" * 40, direct_only=True)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX private token file")
+    def test_group_world_readable_file_rejected_without_network(self):
+        self.token_file.chmod(0o644)
+        rc, out, err, factory = self.invoke(*self.record_args())
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+        self.assertIn("private token file unavailable or unsafe", err)
+        self.assertNotIn(str(self.token_file), err)
+        factory.assert_not_called()
+
+    @unittest.skipUnless(os.name == "posix", "POSIX private token file")
+    def test_symlinked_file_rejected_without_network(self):
+        alias = Path(self.temp.name) / "alias.token"
+        alias.symlink_to(self.token_file)
+        args = list(self.record_args())
+        args[3] = str(alias)
+        rc, _out, err, factory = self.invoke(*args)
+        self.assertEqual(rc, 2)
+        self.assertIn("private token file unavailable or unsafe", err)
+        factory.assert_not_called()
+
+    def test_remote_url_substitution_rejected_before_token_read(self):
+        args = ["--actor", "agent.vn2", "--url", "https://untrusted.example/blotter",
+                "--token-file", str(self.token_file), "record", "--session", "testing",
+                "--kind", "test.executed", "--message", "not executed"]
+        with mock.patch("agent_blotter.turn._read_private_token") as read_token:
+            rc, _out, err, factory = self.invoke(*args)
+        self.assertEqual(rc, 2)
+        self.assertIn("does not match operator configuration", err)
+        self.assertNotIn("untrusted.example", err)
+        read_token.assert_not_called()
+        factory.assert_not_called()
+
+    def test_windows_token_file_is_denied_without_verified_acl(self):
+        from agent_blotter.probe import _read_private_token
+        with mock.patch("agent_blotter.probe.os.name", "nt"):
+            with self.assertRaises(PermissionError):
+                _read_private_token(self.token_file)
+
+    def test_loopback_url_substitution_rejected_when_pinned(self):
+        args = ["--actor", "agent.vn2", "--url", "http://127.0.0.1:12345",
+                "record", "--session", "testing", "--kind", "test.executed",
+                "--message", "not executed"]
+        rc, _out, err, factory = self.invoke(*args, environ={"BLOTTER_TOKEN": "T" * 40})
+        self.assertEqual(rc, 2)
+        self.assertIn("does not match operator configuration", err)
+        factory.assert_not_called()
+
+    def test_unpinned_remote_url_rejected(self):
+        args = ["--actor", "agent.vn2", "--url", self.url,
+                "record", "--session", "testing", "--kind", "test.executed",
+                "--message", "not executed"]
+        rc, _out, err, factory = self.invoke(*args, environ={"BLOTTER_URL": "",
+                                                           "BLOTTER_TOKEN": "T" * 40})
+        self.assertEqual(rc, 2)
+        self.assertIn("does not match operator configuration", err)
+        factory.assert_not_called()
+
+    def test_unpinned_loopback_url_rejected(self):
+        args = ["--actor", "agent.vn1", "--url", "http://127.0.0.1:19083",
+                "record", "--session", "testing", "--kind", "test.executed",
+                "--message", "not executed"]
+        rc, _out, err, factory = self.invoke(*args, environ={"BLOTTER_URL": "",
+                                                           "BLOTTER_TOKEN": "T" * 40})
+        self.assertEqual(rc, 2)
+        self.assertIn("does not match operator configuration", err)
+        factory.assert_not_called()
+
+    def test_process_scoped_token_supports_windows_without_token_file(self):
+        args = ["--actor", "agent.vn1", "record", "--session", "testing",
+                "--kind", "test.executed", "--message", "not sent"]
+        rc, _out, err, factory = self.invoke(*args, environ={"BLOTTER_TOKEN": "T" * 40})
+        self.assertEqual(rc, 0, err)
+        factory.assert_called_once_with(
+            self.url, actor="agent.vn1", token="T" * 40, direct_only=True)
+
+    def test_control_character_token_rejected(self):
+        args = ["--actor", "agent.vn1", "record", "--session", "testing",
+                "--kind", "test.executed", "--message", "not sent"]
+        rc, _out, err, factory = self.invoke(*args, environ={"BLOTTER_TOKEN": "T" * 40 + "\r"})
+        self.assertEqual(rc, 2)
+        self.assertIn("invalid private token configuration", err)
+        factory.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
