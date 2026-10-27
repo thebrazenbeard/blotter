@@ -83,6 +83,12 @@ turn catch-up, a latest-20 view, and explicit activity append, see
 [MCP stdio adapter](docs/MCP_STDIO.md). This does not automatically install
 tools into ChatGPT or make a private Lappy tailnet endpoint reachable.
 
+For failures that need to be separated into configuration, authentication,
+connectivity, and API-version problems, see [Blotter diagnostics](docs/DIAGNOSTICS.md).
+The read-only-by-default `blotter-doctor` command checks authenticated health
+and the bounded latest-history route. It only appends a test record when
+`--test-append` is explicitly provided.
+
 No code copied from the referenced repositories; owner licensing is undecided.
 
 ## Tests
