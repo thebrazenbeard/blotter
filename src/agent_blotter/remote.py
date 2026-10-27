@@ -18,12 +18,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect())
+_DIRECT_NO_REDIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _NoRedirect())
 
 
 class RemoteBlotter:
     """Connect a credential-bound agent to one shared Blotter server."""
 
-    def __init__(self, url: str, *, actor: str, token: str, timeout: float = 10.0):
+    def __init__(self, url: str, *, actor: str, token: str, timeout: float = 10.0,
+                 direct_only: bool = False):
         self.actor = _valid_id(actor, "actor")
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -44,6 +47,10 @@ class RemoteBlotter:
         self.url = url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        # Diagnostics for private services must not inherit HTTPS_PROXY.
+        # Existing general clients retain their prior explicit-proxy behavior.
+        self._opener = (_DIRECT_NO_REDIRECT_OPENER if direct_only
+                        else _NO_REDIRECT_OPENER)
 
     def _request(self, route: str, data: dict[str, Any] | None = None) -> dict:
         headers = {"Authorization": "Bearer " + self.token,
@@ -55,13 +62,15 @@ class RemoteBlotter:
         req = urllib.request.Request(self.url + route, data=body, headers=headers,
                                      method="POST" if body is not None else "GET")
         try:
-            with _NO_REDIRECT_OPENER.open(req, timeout=self.timeout) as reply:
+            with self._opener.open(req, timeout=self.timeout) as reply:
                 return json.load(reply)
         except urllib.error.HTTPError as exc:
             try:
                 try:
-                    reason = json.loads(exc.read().decode("utf-8")).get("error", "request rejected")
-                except (ValueError, UnicodeError):
+                    details = json.loads(exc.read().decode("utf-8"))
+                    reason = details.get("error", "request rejected") if isinstance(
+                        details, dict) else "request rejected"
+                except (ValueError, UnicodeError, OSError):
                     reason = "request rejected"
             finally:
                 exc.close()

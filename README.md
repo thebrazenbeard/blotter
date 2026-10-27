@@ -38,6 +38,11 @@ The token's server-bound identity must match --actor on checks and writes. Never
 
 For checkout-only development without installation, set PYTHONPATH=src and replace blotter with python -m agent_blotter.
 
+For fail-closed **remote-only** host diagnostics before enrolling a new node,
+use `blotter-probe` (read-only by default); see
+[remote client probe](docs/REMOTE_CLIENT_PROBE.md). It never creates a local
+ledger or installs a ChatGPT connector.
+
 ## Python API
 
 Local:
