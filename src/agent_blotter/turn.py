@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 from .remote import RemoteBlotter
+from .probe import _read_private_token, _target_trusted
 from .store import BlotterError, GENESIS, _valid_id
 
 @contextlib.contextmanager
@@ -132,9 +133,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if not args.url: raise BlotterError("BLOTTER_URL or --url required")
-        token = (Path(args.token_file).read_text(encoding="utf-8").strip()
-                 if args.token_file else os.environ.get("BLOTTER_TOKEN",""))
-        client = RemoteBlotter(args.url,actor=args.actor,token=token)
+        # Before accessing credentials, reject command-line destination
+        # substitution against the operator-owned BLOTTER_URL setting.
+        if not os.environ.get("BLOTTER_URL") or not _target_trusted(args.url):
+            raise BlotterError("Blotter URL does not match operator configuration")
+        try:
+            token = (_read_private_token(Path(args.token_file)) if args.token_file
+                     else os.environ.get("BLOTTER_TOKEN", ""))
+        except (OSError, UnicodeError) as exc:
+            raise BlotterError("private token file unavailable or unsafe") from exc
+        if (not isinstance(token, str) or len(token) > 512 or
+                any(ord(char) < 33 or ord(char) > 126 for char in token)):
+            raise BlotterError("invalid private token configuration")
+        # The private tailnet service must not inherit HTTP(S)_PROXY.
+        client = RemoteBlotter(args.url, actor=args.actor, token=token,
+                              direct_only=True)
         if args.command == "begin":
             value = begin_turn(client,Path(args.state_dir),session=args.session,
                                limit=args.limit,re_enroll_legacy=args.re_enroll_legacy)
