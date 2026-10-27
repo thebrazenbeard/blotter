@@ -33,6 +33,9 @@ class CLITests(unittest.TestCase):
                              ["turn.checked", "command.executed"])
             self.assertEqual([e["seq"] for e in json.loads(run("list").stdout)],
                              [1, 2, 3])
+            latest = run("tail", "--limit", "2")
+            self.assertEqual(latest.returncode, 0, latest.stderr)
+            self.assertEqual([e["seq"] for e in json.loads(latest.stdout)], [2, 3])
             self.assertEqual(len(run("export").stdout.splitlines()), 3)
             self.assertEqual(json.loads(run("verify").stdout)["count"], 3)
             self.assertNotEqual(run("record", "--actor", "a", "--kind", "x",

@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     listing.add_argument("--session")
     listing.add_argument("--after-seq", type=int, default=0)
     listing.add_argument("--limit", type=int, default=100)
+    tail = commands.add_parser("tail", help="read the latest 20 (or N) global activities without writing")
+    tail.add_argument("--limit", type=int, default=20)
     exported = commands.add_parser("export", help="export global history as JSONL")
     exported.add_argument("--after-seq", type=int, default=0)
     commands.add_parser("verify", help="locally verify sequence and hash integrity")
@@ -85,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "list":
             result = ledger.list(actor=args.actor, kind=args.kind, session=args.session,
                                  after_seq=args.after_seq, limit=args.limit)
+        elif args.command == "tail":
+            result = ledger.tail(limit=args.limit)
         elif args.command == "verify":
             result = ledger.verify()
         elif args.command == "export":

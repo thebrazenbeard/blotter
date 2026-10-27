@@ -282,6 +282,19 @@ class Blotter:
         with self._connect() as db:
             return [json.loads(row[0]) for row in db.execute(query, params)]
 
+    def tail(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Read the most recent N global activities, oldest first, without writing.
+
+        This is a status view, not a turn check or a substitute for cursored
+        catch-up. The query fetches only the requested recent rows.
+        """
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise BlotterError("tail limit must be 1-100")
+        with self._connect() as db:
+            rows = db.execute("SELECT body FROM events ORDER BY seq DESC LIMIT ?",
+                              (limit,)).fetchall()
+        return [json.loads(body) for (body,) in reversed(rows)]
+
     def export(self, *, after_seq: int = 0) -> Iterable[str]:
         if type(after_seq) is not int or after_seq < 0:
             raise BlotterError("after_seq must be nonnegative")
