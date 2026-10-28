@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+import ctypes
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import stat
 import subprocess
 import sys
@@ -56,6 +57,27 @@ def _load_token_file(path: Path) -> str:
     return token
 
 
+def _trusted_windows_powershell() -> str:
+    """Resolve PowerShell from the OS system directory, not PATH or SystemRoot.
+
+    The token ACL check is a security boundary. Executing ``powershell.exe``
+    through process search paths could run a lower-trust binary before the
+    credential is read. Fail closed if Windows cannot identify System32.
+    """
+    buffer = ctypes.create_unicode_buffer(32768)
+    try:
+        length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    except (AttributeError, OSError, ValueError) as exc:
+        raise ValueError("Windows trusted system directory unavailable") from exc
+    if not 0 < length < len(buffer):
+        raise ValueError("Windows trusted system directory unavailable")
+    system_directory = PureWindowsPath(buffer.value)
+    if (not system_directory.is_absolute() or len(system_directory.drive) != 2
+            or system_directory.drive[1] != ":"):
+        raise ValueError("Windows trusted system directory is invalid")
+    return str(system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+
+
 def _check_windows_token_acl(path: Path) -> None:
     """Fail closed unless Windows owner and allowed ACEs are this user/SYSTEM.
 
@@ -81,7 +103,7 @@ if (-not $foundMe) { exit 4 }
 """
     env = dict(os.environ, BLOTTER_MCP_TOKEN_PATH=str(path))
     try:
-        check = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive",
+        check = subprocess.run([_trusted_windows_powershell(), "-NoProfile", "-NonInteractive",
                                 "-Command", script], env=env, capture_output=True,
                                text=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError) as exc:

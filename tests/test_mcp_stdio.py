@@ -1,11 +1,12 @@
 """Wire- and authority-boundary tests for the dependency-free MCP adapter."""
+import ctypes
 import io
 import json
 import os
 import tempfile
 import threading
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 from agent_blotter import Blotter, BlotterError
@@ -236,20 +237,55 @@ class StdioAdapterTests(unittest.TestCase):
         class Process:
             returncode = 0
             stdout = "OK\n"
-        with mock.patch("agent_blotter.mcp_stdio.subprocess.run", return_value=Process()) as run:
+        def system_directory(buffer, capacity):
+            buffer.value = r"C:\Windows\System32"
+            return len(buffer.value)
+        with mock.patch.object(ctypes, "windll", create=True) as windows:
+            windows.kernel32.GetSystemDirectoryW.side_effect = system_directory
+            with mock.patch("agent_blotter.mcp_stdio.subprocess.run", return_value=Process()) as run:
+                _check_windows_token_acl(Path("C:/private/agent.token"))
+                self.assertIn("BLOTTER_MCP_TOKEN_PATH", run.call_args.kwargs["env"])
+                self.assertNotIn("S" * 40, str(run.call_args))
+                script = run.call_args.args[0][-1]
+                self.assertIn("$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value", script)
+                self.assertIn("if ($ownerSid -notin $permitted) { exit 5 }", script)
+            for status, output in ((1, ""), (5, ""), (0, "not OK")):
+                with self.subTest(status=status, output=output):
+                    with mock.patch("agent_blotter.mcp_stdio.subprocess.run") as run:
+                        run.return_value.returncode = status
+                        run.return_value.stdout = output
+                        with self.assertRaises(ValueError):
+                            _check_windows_token_acl(Path("C:/private/agent.token"))
+
+    def test_windows_acl_uses_os_system_directory_not_search_path(self):
+        class Process:
+            returncode = 0
+            stdout = "OK\n"
+
+        def system_directory(buffer, capacity):
+            buffer.value = r"C:\Windows\System32"
+            return len(buffer.value)
+
+        with mock.patch.object(ctypes, "windll", create=True) as windows, \
+             mock.patch("agent_blotter.mcp_stdio.subprocess.run",
+                        return_value=Process()) as run, \
+             mock.patch.dict(os.environ, {"PATH": r"C:\untrusted",
+                                       "SystemRoot": r"C:\untrusted"}):
+            windows.kernel32.GetSystemDirectoryW.side_effect = system_directory
             _check_windows_token_acl(Path("C:/private/agent.token"))
-            self.assertIn("BLOTTER_MCP_TOKEN_PATH", run.call_args.kwargs["env"])
-            self.assertNotIn("S" * 40, str(run.call_args))
-            script = run.call_args.args[0][-1]
-            self.assertIn("$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value", script)
-            self.assertIn("if ($ownerSid -notin $permitted) { exit 5 }", script)
-        for status, output in ((1, ""), (5, ""), (0, "not OK")):
-            with self.subTest(status=status, output=output):
-                with mock.patch("agent_blotter.mcp_stdio.subprocess.run") as run:
-                    run.return_value.returncode = status
-                    run.return_value.stdout = output
-                    with self.assertRaises(ValueError):
-                        _check_windows_token_acl(Path("C:/private/agent.token"))
+
+        binary = PureWindowsPath(run.call_args.args[0][0])
+        self.assertTrue(binary.is_absolute())
+        self.assertEqual(binary, PureWindowsPath(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"))
+
+    def test_windows_acl_rejects_unavailable_system_directory(self):
+        with mock.patch.object(ctypes, "windll", create=True) as windows, \
+             mock.patch("agent_blotter.mcp_stdio.subprocess.run") as run:
+            windows.kernel32.GetSystemDirectoryW.return_value = 0
+            with self.assertRaises(ValueError):
+                _check_windows_token_acl(Path("C:/private/agent.token"))
+            self.assertEqual(run.call_count, 0)
 
     def test_pinned_urls_reject_credential_exfiltration_destinations(self):
         self.assertEqual(_validate_config_url(self.bridge.client.url), self.bridge.client.url)
