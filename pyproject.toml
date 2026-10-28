@@ -16,6 +16,8 @@ blotter = "agent_blotter.cli:main"
 blotter-serve = "agent_blotter.server:main"
 blotter-turn = "agent_blotter.turn:main"
 blotter-probe = "agent_blotter.probe:main"
+blotter-mcp = "agent_blotter.mcp_stdio:main"
+blotter-doctor = "agent_blotter.doctor:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -242,11 +242,21 @@ def create_server(
             if parts.path == "/v1/health":
                 self._send(200, {"ok": True, "schema_version": SCHEMA_VERSION})
                 return
-            if parts.path != "/v1/events":
+            if parts.path not in ("/v1/events", "/v1/tail"):
                 self._send(404, {"error": "route not found"})
                 return
             try:
-                args = parse_qs(parts.query, strict_parsing=True)
+                # Preserve empty values so `limit=` cannot silently become a
+                # missing parameter and `limit=20&limit=` cannot bypass the
+                # repeated-field rejection below.
+                args = parse_qs(parts.query, strict_parsing=True,
+                                keep_blank_values=True)
+                if parts.path == "/v1/tail":
+                    if set(args) - {"limit"} or any(len(values) != 1 for values in args.values()):
+                        raise BlotterError("unknown or repeated tail query fields")
+                    limit = int(args.get("limit", ["20"])[0])
+                    self._send(200, {"events": ledger.tail(limit=limit)})
+                    return
                 if set(args) - READ_FIELDS or any(len(values) != 1 for values in args.values()):
                     raise BlotterError("unknown or repeated query fields")
                 after_seq = int(args.get("after_seq", ["0"])[0])

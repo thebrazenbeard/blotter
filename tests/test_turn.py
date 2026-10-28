@@ -6,6 +6,25 @@ from agent_blotter.remote import RemoteBlotter
 from agent_blotter.server import create_server
 from agent_blotter.turn import begin_turn, main as turn_main
 
+
+class WindowsConsoleOutputTests(unittest.TestCase):
+    def test_turn_begin_prints_unicode_history_on_cp1252_stdout(self):
+        """The cursor can already be committed when stdout encoding fails."""
+        from agent_blotter.turn import main
+        expected = {"cursor": 2, "events": [{"seq": 1, "message": "A → B and 漢字"}]}
+        raw = io.BytesIO()
+        stdout = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+        with mock.patch("agent_blotter.turn.RemoteBlotter"), \
+             mock.patch("agent_blotter.turn.begin_turn", return_value=expected), \
+             mock.patch.dict(os.environ, {"BLOTTER_TOKEN": "A" * 40,
+                                           "BLOTTER_URL": "http://127.0.0.1:8832"}), \
+             mock.patch("sys.stdout", stdout):
+            result = main(["--actor", "agent.one", "--url", "http://127.0.0.1:8832",
+                           "begin", "--session", "turn-1"])
+        stdout.flush()
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(raw.getvalue().decode("cp1252")), expected)
+
 class TurnTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()

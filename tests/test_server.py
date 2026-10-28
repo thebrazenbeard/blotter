@@ -93,6 +93,41 @@ class ServerTests(unittest.TestCase):
                                 source_ids=[])
         self.assertEqual(event["source_ids"], [])
 
+    def test_authenticated_global_tail_is_bounded_read_only(self):
+        for i in range(25):
+            (self.one if i % 2 else self.two).record(kind="test.executed", message=f"{i}")
+        self.assertEqual([ev["seq"] for ev in self.two.tail(limit=20)], list(range(6, 26)))
+        self.assertEqual([ev["seq"] for ev in self.one.tail(limit=1)], [25])
+        self.assertEqual(self.store.verify()["count"], 25)
+
+        for suffix in ("?limit=0", "?limit=101", "?limit=abc", "?limit=",
+                       "?limit=20&limit=", "?limit=&limit=20",
+                       "?limit=20&actor=agent.one", "?limit=20&actor="):
+            with self.subTest(suffix=suffix):
+                req = urllib.request.Request(self.url + "/v1/tail" + suffix,
+                         headers={"Authorization": "Bearer " + self.token_a})
+                with self.assertRaises(urllib.error.HTTPError) as exc:
+                    urllib.request.urlopen(req, timeout=3)
+                self.assertEqual(exc.exception.code, 422)
+                exc.exception.close()
+        req = urllib.request.Request(self.url + "/v1/tail?limit=20")
+        with self.assertRaises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req, timeout=3)
+        self.assertEqual(exc.exception.code, 401)
+        exc.exception.close()
+        self.assertEqual(self.store.verify()["count"], 25)
+
+    def test_events_list_also_rejects_blank_query_values(self):
+        for suffix in ("?limit=", "?limit=20&limit=", "?after_seq=", "?actor="):
+            with self.subTest(suffix=suffix):
+                req = urllib.request.Request(self.url + "/v1/events" + suffix,
+                         headers={"Authorization": "Bearer " + self.token_a})
+                with self.assertRaises(urllib.error.HTTPError) as exc:
+                    urllib.request.urlopen(req, timeout=3)
+                self.assertEqual(exc.exception.code, 422)
+                exc.exception.close()
+        self.assertEqual(self.store.verify()["count"], 0)
+
     def test_server_identity_is_credential_bound(self):
         wrong = RemoteBlotter(self.url, actor="agent.other", token="X" * 40)
         with self.assertRaises(BlotterError):
