@@ -222,13 +222,14 @@ class StdioAdapterTests(unittest.TestCase):
         self.assertEqual(self.db.verify()["count"], 0)
 
     def test_private_token_file_rejects_world_read_permissions(self):
+        if os.name == "nt":
+            self.skipTest("POSIX mode bits do not validate Windows token ACLs")
         token_path = Path(self.temp.name, "token")
         token_path.write_text("S" * 40, encoding="utf-8")
-        if os.name != "nt":
-            token_path.chmod(0o644)
-            with self.assertRaises(ValueError):
-                _load_token_file(token_path)
-            token_path.chmod(0o600)
+        token_path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            _load_token_file(token_path)
+        token_path.chmod(0o600)
         self.assertEqual(_load_token_file(token_path), "S" * 40)
 
     def test_windows_acl_validation_fails_closed(self):
