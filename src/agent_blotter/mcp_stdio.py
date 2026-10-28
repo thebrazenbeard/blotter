@@ -57,7 +57,7 @@ def _load_token_file(path: Path) -> str:
 
 
 def _check_windows_token_acl(path: Path) -> None:
-    """Fail closed unless Windows ACL allows only this user and SYSTEM.
+    """Fail closed unless Windows owner and allowed ACEs are this user/SYSTEM.
 
     PowerShell's Windows security principal translation avoids brittle parsing
     of localized icacls text. No token contents are read by this command.
@@ -67,6 +67,8 @@ $ErrorActionPreference = 'Stop'
 $acl = Get-Acl -LiteralPath $env:BLOTTER_MCP_TOKEN_PATH
 $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $permitted = @($me, 'S-1-5-18')
+$ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+if ($ownerSid -notin $permitted) { exit 5 }
 $foundMe = $false
 foreach ($rule in $acl.Access) {
     if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
@@ -85,7 +87,7 @@ if (-not $foundMe) { exit 4 }
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError("Windows private token ACL could not be verified") from exc
     if check.returncode != 0 or check.stdout.strip() != "OK":
-        raise ValueError("Windows private token ACL is not restricted to actor and SYSTEM")
+        raise ValueError("Windows private token owner/ACL is not restricted to actor and SYSTEM")
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:

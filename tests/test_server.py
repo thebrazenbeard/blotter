@@ -1,4 +1,5 @@
 import concurrent.futures
+import contextlib
 import json
 import os
 import shutil
@@ -398,10 +399,15 @@ class ServerTests(unittest.TestCase):
         path.write_text(json.dumps({"agent.one": self.token_a}), encoding="utf-8")
         if os.name != "nt":
             path.chmod(0o600)
-        self.assertEqual(load_credentials(path), {self.token_a: "agent.one"})
-        path.write_text(json.dumps({"agent.one": "short"}), encoding="utf-8")
-        with self.assertRaises(BlotterError):
-            load_credentials(path)
+        # A temporary directory does not guarantee a private Windows DACL.
+        # Schema validation is separate from the fail-closed ACL tests.
+        permissions = (mock.patch("agent_blotter.mcp_stdio._check_windows_token_acl")
+                       if os.name == "nt" else contextlib.nullcontext())
+        with permissions:
+            self.assertEqual(load_credentials(path), {self.token_a: "agent.one"})
+            path.write_text(json.dumps({"agent.one": "short"}), encoding="utf-8")
+            with self.assertRaises(BlotterError):
+                load_credentials(path)
 
     def test_reject_nonstring_event_enums(self):
         for name in ("level", "evidence", "effect"):
