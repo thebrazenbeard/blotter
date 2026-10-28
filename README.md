@@ -30,6 +30,12 @@ Python 3.10+; no third-party runtime dependencies.
 
 By default the CLI uses the local database. Use BLOTTER_URL and BLOTTER_TOKEN environment variables to direct it to the central service. For authenticated remote reads, also supply --identity:
 
+Remote CLI requests connect **directly** by default: ambient `HTTP_PROXY` and
+`HTTPS_PROXY` cannot receive actor bearer tokens. For an operator-approved
+trusted gateway that requires an environment-configured proxy, explicitly opt
+in with `--allow-environment-proxy` before the command. Do not use that flag for
+the private Lappy tailnet service.
+
     blotter check --actor agent.one --session turn-001 --after-seq 0
     blotter record --actor agent.one --session turn-001 --kind test.executed --message "Observed test result"
     blotter --identity agent.one list

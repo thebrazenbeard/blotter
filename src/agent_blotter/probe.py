@@ -28,6 +28,11 @@ def _emit(status: str, *, stage: str, **fields: object) -> int:
 
 def _error_code(exc: BaseException, *, stage: str) -> str:
     """Classify a result without propagating exception text or credentials."""
+    # HTTP 5xx can be emitted by a gateway after the write committed;
+    # the remote client has already classified such a POST as ambiguous.
+    if stage == "append" and isinstance(exc, BlotterError) and \
+            "write outcome may be unknown" in str(exc):
+        return "APPEND_OUTCOME_UNKNOWN"
     cause = exc.__cause__
     if isinstance(cause, urllib.error.HTTPError):
         if cause.code == 401:

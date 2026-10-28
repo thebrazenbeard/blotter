@@ -18,6 +18,8 @@ def main(argv: list[str] | None = None) -> int:
         help="single local SQLite file")
     parser.add_argument("--url", default=os.environ.get("BLOTTER_URL"),
                         help="central Blotter HTTPS service URL (use BLOTTER_TOKEN environment variable)")
+    parser.add_argument("--allow-environment-proxy", action="store_true",
+                        help="explicitly allow HTTPS_PROXY for a trusted gateway; default direct protects private tokens")
     parser.add_argument("--identity", help="agent credential identity for remote read/export")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="initialize a local activity ledger")
@@ -61,7 +63,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.command in ("check", "record") and args.identity and args.identity != args.actor:
                 raise BlotterError("--identity must equal --actor on remote writes/checks")
             ledger = RemoteBlotter(args.url, actor=bound_actor,
-                                  token=os.environ.get("BLOTTER_TOKEN", ""))
+                                  token=os.environ.get("BLOTTER_TOKEN", ""),
+                                  direct_only=not args.allow_environment_proxy)
         else:
             ledger = Blotter(Path(args.db))
         if args.command == "init":

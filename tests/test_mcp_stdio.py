@@ -240,7 +240,10 @@ class StdioAdapterTests(unittest.TestCase):
             _check_windows_token_acl(Path("C:/private/agent.token"))
             self.assertIn("BLOTTER_MCP_TOKEN_PATH", run.call_args.kwargs["env"])
             self.assertNotIn("S" * 40, str(run.call_args))
-        for status, output in ((1, ""), (0, "not OK")):
+            script = run.call_args.args[0][-1]
+            self.assertIn("$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value", script)
+            self.assertIn("if ($ownerSid -notin $permitted) { exit 5 }", script)
+        for status, output in ((1, ""), (5, ""), (0, "not OK")):
             with self.subTest(status=status, output=output):
                 with mock.patch("agent_blotter.mcp_stdio.subprocess.run") as run:
                     run.return_value.returncode = status
