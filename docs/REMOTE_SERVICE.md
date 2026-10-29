@@ -30,10 +30,14 @@ routes and GETs with request bodies also close before unread bytes can be
 parsed as another request. These safeguards
 reduce stale HTTP connections and ambiguous framing. TLS negotiation runs
 inside each accepted client's worker, with the same idle socket timeout, so a
-silent handshake cannot monopolize the server's accept loop. This does **not**
-establish resistance to high-volume connection floods, slow byte-by-byte
-trickles, or unbounded concurrent request threads. Keep the service behind a
-restricted private-network ingress and qualify resource exhaustion separately.
+silent handshake cannot monopolize the server's accept loop. Concurrent HTTP
+connections, including unauthenticated TLS handshakes, are limited to 32 by
+default (`--max-workers N`, allowed range 1-256); excess accepted sockets are
+closed immediately without launching a worker or buffering another request.
+This bounds worker-thread growth but **does not** establish resistance to
+high-volume connection floods or slow byte-by-byte trickles: malicious peers
+can still occupy all available slots and deny service. Keep ingress private,
+monitor saturation, and qualify operational resource limits separately.
 
 ## Client — one service for all agents
 
