@@ -78,6 +78,24 @@ class ServerTests(unittest.TestCase):
                 caught.exception.close()
         self.assertEqual(self.store.verify()["count"], 0)
 
+    def test_excessive_json_nesting_fails_closed_without_recording(self):
+        # A small body can exceed the standard decoder's recursion limit.
+        nested = b"[" * 10000 + b"0" + b"]" * 10000
+        body = b'{"kind":"tool.executed","message":"nested","payload":' + nested + b"}"
+        request = urllib.request.Request(
+            self.url + "/v1/record", data=body, method="POST",
+            headers={"Authorization": "Bearer " + self.token_a,
+                     "Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=3)
+        self.assertEqual(caught.exception.code, 422)
+        self.assertNotIn(b"payload", caught.exception.read())
+        caught.exception.close()
+        self.assertEqual(self.store.verify()["count"], 0)
+        # A malformed request must not disable subsequent authenticated writes.
+        valid = self.one.record(kind="tool.executed", message="survived")
+        self.assertEqual(valid["seq"], 1)
+
     def test_remote_client_does_not_silently_coerce_invalid_empty_fields(self):
         # Invalid falsey caller values must be rejected, not rewritten into
         # different valid events before admission.
