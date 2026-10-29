@@ -336,6 +336,64 @@ class ServerTests(unittest.TestCase):
                 with self.assertRaises(BlotterError):
                     create_server(self.store, self.tokens, port=0, request_timeout=value)
 
+    def test_invalid_worker_limits_fail_before_binding(self):
+        for value in (0, -1, 257, True, 1.5, "8"):
+            with self.subTest(max_workers=value):
+                with self.assertRaises(BlotterError):
+                    create_server(self.store, self.tokens, port=0, max_workers=value)
+
+    def test_worker_limit_rejects_excess_connections_and_recovers(self):
+        """One held worker cannot create unbounded new connection threads."""
+        server = create_server(self.store, self.tokens, port=0,
+                               max_workers=1, request_timeout=2)
+        entered = threading.Event()
+        release = threading.Event()
+        original_finish = server.finish_request
+
+        def hold_first(request, address):
+            if not entered.is_set():
+                entered.set()
+                release.wait(timeout=3)
+            return original_finish(request, address)
+
+        server.finish_request = hold_first
+        worker = threading.Thread(target=server.serve_forever,
+                                  kwargs={"poll_interval": 0.01}, daemon=True)
+        worker.start()
+        first = None
+        try:
+            first = socket.create_connection(("127.0.0.1", server.server_port), timeout=2)
+            self.assertTrue(entered.wait(1))
+            with socket.create_connection(("127.0.0.1", server.server_port), timeout=2) as excess:
+                excess.settimeout(2)
+                try:
+                    self.assertEqual(excess.recv(1), b"")
+                except ConnectionResetError:
+                    pass  # A reset is also an immediate rejection on Windows.
+            release.set()
+            first.close()
+            first = None
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/health",
+                headers={"Authorization": "Bearer " + self.token_a})
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    with urllib.request.urlopen(request, timeout=1) as response:
+                        self.assertEqual(response.status, 200)
+                    break
+                except (urllib.error.URLError, ConnectionError, TimeoutError):
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
+        finally:
+            release.set()
+            if first is not None:
+                first.close()
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
+
     def test_unfinished_http_headers_release_connection(self):
         server = create_server(self.store, self.tokens, port=0, request_timeout=0.15)
         worker = threading.Thread(target=server.serve_forever,
