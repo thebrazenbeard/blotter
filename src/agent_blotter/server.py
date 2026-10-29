@@ -12,6 +12,7 @@ import math
 import os
 import ssl
 import stat
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -21,6 +22,7 @@ from .store import Blotter, BlotterError, SCHEMA_VERSION, _valid_id
 MAX_HTTP_BODY = 70000
 MAX_HTTP_PAGE = 100
 DEFAULT_REQUEST_TIMEOUT = 15.0
+DEFAULT_MAX_WORKERS = 32
 WRITE_FIELDS = frozenset(("kind", "message", "session", "level", "evidence",
                           "effect", "payload", "source_ids", "event_id",
                           "correlation_id", "occurred_at"))
@@ -42,15 +44,40 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
 
 
 class _BlotterHTTPServer(ThreadingHTTPServer):
-    """Perform optional TLS handshakes inside client workers, not accept().
+    """Bound concurrent connections and handshake inside client workers.
 
     Wrapping a listening socket makes SSLSocket.accept() negotiate TLS before
     ThreadingMixIn starts a worker. One silent peer could then block every
-    subsequent connection for the handshake timeout interval.
+    subsequent connection for the handshake timeout interval. Without a worker
+    cap, even unauthenticated slow peers can create unbounded threads.
     """
 
     tls_context: ssl.SSLContext | None = None
     tls_handshake_timeout: float = DEFAULT_REQUEST_TIMEOUT
+
+    def __init__(self, server_address, RequestHandlerClass, *, max_workers: int):
+        self._worker_slots = threading.BoundedSemaphore(max_workers)
+        super().__init__(server_address, RequestHandlerClass)
+
+    def process_request(self, request, client_address) -> None:
+        # Admission runs on the accept thread; never queue a connection or
+        # create a worker when every slot is occupied (including TLS handshakes).
+        if not self._worker_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            # Thread creation can fail, so a permit must not leak before a
+            # worker has been started. The worker releases it on normal exit.
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
 
     def finish_request(self, request, client_address) -> None:
         if self.tls_context is None:
@@ -120,6 +147,7 @@ def create_server(
     ledger: Blotter, credentials: dict[str, str], host: str = "127.0.0.1",
     port: int = 8832, *, certfile: str | None = None, keyfile: str | None = None,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    max_workers: int = DEFAULT_MAX_WORKERS,
 ) -> ThreadingHTTPServer:
     """Create a bound service. Non-loopback binds require server TLS."""
     if not isinstance(credentials, dict) or not credentials:
@@ -145,6 +173,8 @@ def create_server(
     if (type(request_timeout) not in (int, float) or
             not math.isfinite(request_timeout) or not 0 < request_timeout <= 120):
         raise BlotterError("request timeout must be finite and 0-120 seconds")
+    if type(max_workers) is not int or not 1 <= max_workers <= 256:
+        raise BlotterError("max_workers must be an integer in 1-256")
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -309,7 +339,7 @@ def create_server(
             except OSError:
                 self._send(503, {"error": "ledger temporarily unavailable"})
 
-    result = _BlotterHTTPServer((host, port), Handler)
+    result = _BlotterHTTPServer((host, port), Handler, max_workers=max_workers)
     result.daemon_threads = True
     if certfile:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -336,13 +366,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tls-key")
     parser.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT,
                         help="maximum idle seconds while reading each HTTP request (default 15)")
+    parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS,
+                        help="maximum concurrent HTTP clients (default 32; 1-256)")
     args = parser.parse_args(argv)
     try:
         ledger = Blotter(args.db)
         credentials = load_credentials(args.credentials)
         server = create_server(ledger, credentials, host=args.host, port=args.port,
                                certfile=args.tls_cert, keyfile=args.tls_key,
-                               request_timeout=args.request_timeout)
+                               request_timeout=args.request_timeout,
+                               max_workers=args.max_workers)
         print(f"Blotter ledger listening on {args.host}:{args.port}", flush=True)
         try:
             server.serve_forever(poll_interval=0.1)
