@@ -219,7 +219,10 @@ def create_server(
             raw = self.rfile.read(length)
             if len(raw) != length:
                 raise BlotterError("incomplete request body")
-            value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json_object)
+            try:
+                value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json_object)
+            except RecursionError as exc:
+                raise BlotterError("request JSON nesting exceeds parser limit") from exc
             if not isinstance(value, dict):
                 raise BlotterError("request body must be a JSON object")
             return value
