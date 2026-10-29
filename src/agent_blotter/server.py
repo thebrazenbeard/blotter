@@ -27,6 +27,20 @@ WRITE_FIELDS = frozenset(("kind", "message", "session", "level", "evidence",
 READ_FIELDS = frozenset(("after_seq", "limit", "actor", "kind", "session"))
 
 
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    """Reject ambiguous JSON keys at every nesting level before admission.
+
+    A duplicate key must not silently replace an earlier value, especially in
+    credential-bound audit records. Do not echo a potentially sensitive key.
+    """
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise BlotterError("duplicate JSON object key")
+        obj[key] = value
+    return obj
+
+
 class _BlotterHTTPServer(ThreadingHTTPServer):
     """Perform optional TLS handshakes inside client workers, not accept().
 
@@ -85,7 +99,8 @@ def load_credentials(path: str | Path) -> dict[str, str]:
         raise BlotterError("credentials file not found")
     _check_credentials_file_permissions(path)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"),
+                          object_pairs_hook=_unique_json_object)
     except (ValueError, UnicodeError) as exc:
         raise BlotterError("invalid credentials JSON") from exc
     if not isinstance(data, dict) or not data:
@@ -204,7 +219,7 @@ def create_server(
             raw = self.rfile.read(length)
             if len(raw) != length:
                 raise BlotterError("incomplete request body")
-            value = json.loads(raw.decode("utf-8"))
+            value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json_object)
             if not isinstance(value, dict):
                 raise BlotterError("request body must be a JSON object")
             return value
