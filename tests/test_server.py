@@ -89,12 +89,31 @@ class ServerTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(request, timeout=3)
         self.assertEqual(caught.exception.code, 422)
-        self.assertNotIn(b"payload", caught.exception.read())
+        self.assertNotIn(b'"message":"nested"', caught.exception.read())
         caught.exception.close()
         self.assertEqual(self.store.verify()["count"], 0)
         # A malformed request must not disable subsequent authenticated writes.
         valid = self.one.record(kind="tool.executed", message="survived")
         self.assertEqual(valid["seq"], 1)
+
+    def test_json_decoder_recursion_is_rejected_without_leaking_exception(self):
+        body = b'{"kind":"tool.executed","message":"private-request-marker"}'
+        request = urllib.request.Request(
+            self.url + "/v1/record", data=body, method="POST",
+            headers={"Authorization": "Bearer " + self.token_a,
+                     "Content-Type": "application/json"})
+        # Python decoder depth behavior varies across supported versions:
+        # inject the specific failure path instead of assuming a fixed limit.
+        with mock.patch("agent_blotter.server.json.loads",
+                        side_effect=RecursionError("private-parser-marker")):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request, timeout=3)
+        self.assertEqual(caught.exception.code, 422)
+        response = caught.exception.read()
+        self.assertNotIn(b"private-parser-marker", response)
+        self.assertNotIn(b"private-request-marker", response)
+        caught.exception.close()
+        self.assertEqual(self.store.verify()["count"], 0)
 
     def test_remote_client_does_not_silently_coerce_invalid_empty_fields(self):
         # Invalid falsey caller values must be rejected, not rewritten into
