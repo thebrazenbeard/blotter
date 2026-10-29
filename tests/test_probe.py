@@ -63,13 +63,14 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(result["status"], "CONFIG_MISSING")
         self.assertFalse(home.exists())
 
-    def test_readonly_probe_reports_health_read_and_missing_tail_without_write(self):
+    def test_readonly_probe_reports_health_read_and_available_tail_without_write(self):
         code, result = self.invoke(*self.args())
         self.assertEqual(code, 0, result)
         self.assertEqual(result["status"], "OK")
         self.assertEqual(result["health"], "VERIFIED")
         self.assertEqual(result["read"], "VERIFIED")
-        self.assertEqual(result["tail"], "NOT_DEPLOYED")
+        # The integrated source now serves the authenticated tail route.
+        self.assertEqual(result["tail"], "AVAILABLE")
         self.assertEqual(result["append"], "NOT_ATTEMPTED")
         self.assertEqual(self.store.verify()["count"], 0)
         self.assertNotIn(self.token, json.dumps(result))

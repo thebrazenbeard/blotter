@@ -1,4 +1,5 @@
 import concurrent.futures
+import contextlib
 import json
 import os
 import shutil
@@ -60,6 +61,23 @@ class ServerTests(unittest.TestCase):
         self.assertEqual([e["seq"] for e in self.one.list()], list(range(1, 6)))
         self.assertEqual(self.store.verify()["count"], 5)
 
+    def test_duplicate_json_object_keys_are_rejected(self):
+        for body in (
+            b'{"kind":"tool.executed","kind":"test.executed","message":"ambiguous"}',
+            b'{"kind":"tool.executed","message":"nested","payload":{"safe":1,"safe":2}}',
+        ):
+            with self.subTest(body=body):
+                request = urllib.request.Request(
+                    self.url + "/v1/record", data=body, method="POST",
+                    headers={"Authorization": "Bearer " + self.token_a,
+                             "Content-Type": "application/json"})
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(request, timeout=3)
+                self.assertEqual(caught.exception.code, 422)
+                self.assertNotIn(b"safe", caught.exception.read())
+                caught.exception.close()
+        self.assertEqual(self.store.verify()["count"], 0)
+
     def test_remote_client_does_not_silently_coerce_invalid_empty_fields(self):
         # Invalid falsey caller values must be rejected, not rewritten into
         # different valid events before admission.
@@ -92,6 +110,41 @@ class ServerTests(unittest.TestCase):
         event = self.one.record(kind="tool.executed", message="valid lineage",
                                 source_ids=[])
         self.assertEqual(event["source_ids"], [])
+
+    def test_authenticated_global_tail_is_bounded_read_only(self):
+        for i in range(25):
+            (self.one if i % 2 else self.two).record(kind="test.executed", message=f"{i}")
+        self.assertEqual([ev["seq"] for ev in self.two.tail(limit=20)], list(range(6, 26)))
+        self.assertEqual([ev["seq"] for ev in self.one.tail(limit=1)], [25])
+        self.assertEqual(self.store.verify()["count"], 25)
+
+        for suffix in ("?limit=0", "?limit=101", "?limit=abc", "?limit=",
+                       "?limit=20&limit=", "?limit=&limit=20",
+                       "?limit=20&actor=agent.one", "?limit=20&actor="):
+            with self.subTest(suffix=suffix):
+                req = urllib.request.Request(self.url + "/v1/tail" + suffix,
+                         headers={"Authorization": "Bearer " + self.token_a})
+                with self.assertRaises(urllib.error.HTTPError) as exc:
+                    urllib.request.urlopen(req, timeout=3)
+                self.assertEqual(exc.exception.code, 422)
+                exc.exception.close()
+        req = urllib.request.Request(self.url + "/v1/tail?limit=20")
+        with self.assertRaises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req, timeout=3)
+        self.assertEqual(exc.exception.code, 401)
+        exc.exception.close()
+        self.assertEqual(self.store.verify()["count"], 25)
+
+    def test_events_list_also_rejects_blank_query_values(self):
+        for suffix in ("?limit=", "?limit=20&limit=", "?after_seq=", "?actor="):
+            with self.subTest(suffix=suffix):
+                req = urllib.request.Request(self.url + "/v1/events" + suffix,
+                         headers={"Authorization": "Bearer " + self.token_a})
+                with self.assertRaises(urllib.error.HTTPError) as exc:
+                    urllib.request.urlopen(req, timeout=3)
+                self.assertEqual(exc.exception.code, 422)
+                exc.exception.close()
+        self.assertEqual(self.store.verify()["count"], 0)
 
     def test_server_identity_is_credential_bound(self):
         wrong = RemoteBlotter(self.url, actor="agent.other", token="X" * 40)
@@ -363,10 +416,20 @@ class ServerTests(unittest.TestCase):
         path.write_text(json.dumps({"agent.one": self.token_a}), encoding="utf-8")
         if os.name != "nt":
             path.chmod(0o600)
-        self.assertEqual(load_credentials(path), {self.token_a: "agent.one"})
-        path.write_text(json.dumps({"agent.one": "short"}), encoding="utf-8")
-        with self.assertRaises(BlotterError):
-            load_credentials(path)
+        # A temporary directory does not guarantee a private Windows DACL.
+        # Schema validation is separate from the fail-closed ACL tests.
+        permissions = (mock.patch("agent_blotter.mcp_stdio._check_windows_token_acl")
+                       if os.name == "nt" else contextlib.nullcontext())
+        with permissions:
+            self.assertEqual(load_credentials(path), {self.token_a: "agent.one"})
+            path.write_text(json.dumps({"agent.one": "short"}), encoding="utf-8")
+            with self.assertRaises(BlotterError):
+                load_credentials(path)
+            path.write_text(
+                f'{{"agent.one":"{self.token_a}","agent.one":"{self.token_b}"}}',
+                encoding="utf-8")
+            with self.assertRaisesRegex(BlotterError, "invalid credentials JSON"):
+                load_credentials(path)
 
     def test_reject_nonstring_event_enums(self):
         for name in ("level", "evidence", "effect"):

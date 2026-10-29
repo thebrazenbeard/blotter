@@ -2,12 +2,52 @@
 from __future__ import annotations
 
 import json
+import http.client
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
 
-from .store import BlotterError, _valid_id
+from .store import BlotterError, MAX_EVENT_BYTES, _valid_id
+
+
+# A page contains at most 100 independently bounded 64 KiB events. Leave an
+# additional 64 KiB for metadata and JSON framing, and use much smaller limits
+# for non-page endpoints. Never trust Content-Length as a complete bound.
+_PAGE_OVERHEAD_BYTES = 65536
+_HEALTH_RESPONSE_BYTES = 16384
+_ERROR_RESPONSE_BYTES = 8192
+
+
+def _response_budget(route: str, data: dict[str, Any] | None) -> int:
+    path, _, query = route.partition("?")
+    if path == "/v1/health":
+        return _HEALTH_RESPONSE_BYTES
+    if path == "/v1/record":
+        return MAX_EVENT_BYTES + _PAGE_OVERHEAD_BYTES
+    if path in ("/v1/tail", "/v1/events", "/v1/check"):
+        if path == "/v1/check":
+            raw_limit = (data or {}).get("limit", 100)
+        else:
+            params = urllib.parse.parse_qs(query)
+            raw_limit = params.get("limit", [20 if path == "/v1/tail" else 100])[0]
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 100
+        # Invalid/unbounded requests are rejected by the server; the read
+        # budget must still be bounded even if the server is compromised.
+        return min(100, max(1, limit)) * MAX_EVENT_BYTES + _PAGE_OVERHEAD_BYTES
+    return _HEALTH_RESPONSE_BYTES
+
+
+def _read_bounded(reply: Any, maximum: int) -> bytes:
+    """Read no more than maximum+1 bytes before decoding untrusted JSON."""
+    content = reply.read(maximum + 1)
+    if len(content) > maximum:
+        raise ValueError("response exceeds safe size")
+    return content
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -63,21 +103,81 @@ class RemoteBlotter:
                                      method="POST" if body is not None else "GET")
         try:
             with self._opener.open(req, timeout=self.timeout) as reply:
-                return json.load(reply)
+                try:
+                    content = _read_bounded(reply, _response_budget(route, data))
+                    result = json.loads(content.decode("utf-8"))
+                    if not isinstance(result, dict):
+                        raise ValueError("response is not a JSON object")
+                    return result
+                except (ValueError, UnicodeError, RecursionError) as exc:
+                    # The server may have committed the POST before the
+                    # malformed/oversized response arrived. Never relabel it
+                    # as a definite rejection and risk a duplicate write.
+                    if body is not None:
+                        raise BlotterError(
+                            "invalid or oversized response; write outcome may be unknown: "
+                            "reconcile using event_id") from exc
+                    raise BlotterError(
+                        "invalid or oversized response; no read result verified: "
+                        + str(exc)) from exc
         except urllib.error.HTTPError as exc:
             try:
                 try:
-                    details = json.loads(exc.read().decode("utf-8"))
+                    details = json.loads(_read_bounded(
+                        exc, _ERROR_RESPONSE_BYTES).decode("utf-8"))
                     reason = details.get("error", "request rejected") if isinstance(
                         details, dict) else "request rejected"
-                except (ValueError, UnicodeError, OSError):
+                    if not isinstance(reason, str):
+                        reason = "request rejected"
+                    reason = reason[:256]
+                except (ValueError, UnicodeError, RecursionError, OSError,
+                        http.client.HTTPException):
                     reason = "request rejected"
             finally:
                 exc.close()
+            # A reverse proxy can emit 5xx after the upstream has committed
+            # a POST. Treat it as unknown, never a definite rejection.
+            if body is not None and exc.code >= 500:
+                raise BlotterError(
+                    f"server/upstream error ({exc.code}); write outcome may be unknown: "
+                    "reconcile using event_id") from exc
             raise BlotterError(f"server rejected request ({exc.code}): {reason}") from exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-            # POST effect is ambiguous on disconnect. The caller must reconcile by ID.
-            raise BlotterError("connection failed; write outcome may be unknown: reconcile using event_id") from exc
+        except urllib.error.URLError as exc:
+            # DNS failure proves the request never reached the server, so even a
+            # POST cannot have committed. Do not report a false ambiguous write.
+            reason = exc.reason
+            reason_text = str(reason).lower()
+            dns_failure = (
+                isinstance(reason, socket.gaierror)
+                or (isinstance(reason, OSError) and
+                    getattr(reason, "winerror", None) in (11001, 11002, 11003))
+                or "getaddrinfo failed" in reason_text
+                or "name or service not known" in reason_text
+                or "no such host is known" in reason_text
+            )
+            if dns_failure:
+                raise BlotterError(
+                    "Blotter hostname resolution failed; verify private-network DNS/Tailscale connectivity"
+                ) from exc
+            if body is not None:
+                raise BlotterError(
+                    "connection failed; write outcome may be unknown: reconcile using event_id"
+                ) from exc
+            raise BlotterError(
+                "connection failed before a response; no read result was verified"
+            ) from exc
+        except (TimeoutError, ConnectionError, OSError, http.client.HTTPException) as exc:
+            if body is not None:
+                raise BlotterError(
+                    "connection failed; write outcome may be unknown: reconcile using event_id"
+                ) from exc
+            raise BlotterError(
+                "connection failed before a response; no read result was verified"
+            ) from exc
+
+    def health(self) -> dict:
+        """Authenticated, read-only health check of the configured service."""
+        return self._request("/v1/health")
 
     def check(self, *, session: str = "default", after_seq: int = 0,
               limit: int = 100, expected_after_hash: str | None = None) -> dict:
@@ -108,3 +208,8 @@ class RemoteBlotter:
         query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         return self._request("/v1/events?" + query)["events"]
 
+    def tail(self, *, limit: int = 20) -> list[dict]:
+        """Authenticated recent global history view (not a turn check)."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise BlotterError("tail limit must be 1-100")
+        return self._request("/v1/tail?" + urllib.parse.urlencode({"limit": limit}))["events"]

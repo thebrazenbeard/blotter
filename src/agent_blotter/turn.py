@@ -156,7 +156,9 @@ def main(argv: list[str] | None = None) -> int:
                                   message=args.message,evidence=args.evidence,
                                   effect=args.effect,payload=json.loads(args.payload),
                                   event_id=args.event_id)
-        print(json.dumps(value,ensure_ascii=False,sort_keys=True))
+        # Windows consoles can use CP1252: JSON escapes preserve Unicode data
+        # while preventing an encoding failure after the cursor was persisted.
+        print(json.dumps(value,ensure_ascii=True,sort_keys=True))
         return 0
     except (BlotterError,OSError,ValueError,KeyError,TypeError) as exc:
         print("blotter-turn: "+str(exc),file=sys.stderr)

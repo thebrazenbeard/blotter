@@ -27,6 +27,20 @@ WRITE_FIELDS = frozenset(("kind", "message", "session", "level", "evidence",
 READ_FIELDS = frozenset(("after_seq", "limit", "actor", "kind", "session"))
 
 
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    """Reject ambiguous JSON keys at every nesting level before admission.
+
+    A duplicate key must not silently replace an earlier value, especially in
+    credential-bound audit records. Do not echo a potentially sensitive key.
+    """
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise BlotterError("duplicate JSON object key")
+        obj[key] = value
+    return obj
+
+
 class _BlotterHTTPServer(ThreadingHTTPServer):
     """Perform optional TLS handshakes inside client workers, not accept().
 
@@ -54,6 +68,27 @@ class _BlotterHTTPServer(ThreadingHTTPServer):
             tls_request.close()
 
 
+def _check_credentials_file_permissions(path: Path, *, platform: str | None = None) -> None:
+    """Reject credential files whose permissions cannot be proven private.
+
+    MCP actor tokens and this server's actor-to-token JSON must obey the same
+    fail-closed Windows SID rule. A successful POSIX chmod is not a Windows ACL.
+    """
+    if path.is_symlink():
+        raise BlotterError("credentials file permissions are unsafe")
+    if platform is None:
+        platform = os.name
+    if platform == "nt":
+        # Reuse the established SID-based check, not localized icacls text.
+        from .mcp_stdio import _check_windows_token_acl
+        try:
+            _check_windows_token_acl(path)
+        except (ValueError, OSError) as exc:
+            raise BlotterError("credentials file permissions could not be verified") from exc
+    elif stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise BlotterError("credentials file must not be accessible by group or others")
+
+
 def load_credentials(path: str | Path) -> dict[str, str]:
     """Return token -> actor mapping from an owner-protected JSON file.
 
@@ -62,10 +97,10 @@ def load_credentials(path: str | Path) -> dict[str, str]:
     path = Path(path)
     if not path.is_file():
         raise BlotterError("credentials file not found")
-    if os.name != "nt" and stat.S_IMODE(path.stat().st_mode) & 0o077:
-        raise BlotterError("credentials file must not be accessible by group or others")
+    _check_credentials_file_permissions(path)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"),
+                          object_pairs_hook=_unique_json_object)
     except (ValueError, UnicodeError) as exc:
         raise BlotterError("invalid credentials JSON") from exc
     if not isinstance(data, dict) or not data:
@@ -184,7 +219,7 @@ def create_server(
             raw = self.rfile.read(length)
             if len(raw) != length:
                 raise BlotterError("incomplete request body")
-            value = json.loads(raw.decode("utf-8"))
+            value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json_object)
             if not isinstance(value, dict):
                 raise BlotterError("request body must be a JSON object")
             return value
@@ -242,11 +277,21 @@ def create_server(
             if parts.path == "/v1/health":
                 self._send(200, {"ok": True, "schema_version": SCHEMA_VERSION})
                 return
-            if parts.path != "/v1/events":
+            if parts.path not in ("/v1/events", "/v1/tail"):
                 self._send(404, {"error": "route not found"})
                 return
             try:
-                args = parse_qs(parts.query, strict_parsing=True)
+                # Preserve empty values so `limit=` cannot silently become a
+                # missing parameter and `limit=20&limit=` cannot bypass the
+                # repeated-field rejection below.
+                args = parse_qs(parts.query, strict_parsing=True,
+                                keep_blank_values=True)
+                if parts.path == "/v1/tail":
+                    if set(args) - {"limit"} or any(len(values) != 1 for values in args.values()):
+                        raise BlotterError("unknown or repeated tail query fields")
+                    limit = int(args.get("limit", ["20"])[0])
+                    self._send(200, {"events": ledger.tail(limit=limit)})
+                    return
                 if set(args) - READ_FIELDS or any(len(values) != 1 for values in args.values()):
                     raise BlotterError("unknown or repeated query fields")
                 after_seq = int(args.get("after_seq", ["0"])[0])
