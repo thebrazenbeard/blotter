@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "blotter-codex-local",
+  "version": "0.1.0",
+  "description": "Optional local Codex lifecycle observation into one authenticated Blotter ledger",
+  "extensions": {
+    "com.openai": {
+      "hooks": "./hooks/hooks.json"
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "description": "Optional private Blotter observation hooks for trusted Codex desktop runtimes only",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/blotter_hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/hooks/blotter_hook.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/blotter_hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/hooks/blotter_hook.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/blotter_hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/hooks/blotter_hook.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

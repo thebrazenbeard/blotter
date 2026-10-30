@@ -25,11 +25,46 @@ blotter-mcp --actor bt2.one --url https://lappy.tail86ea75.ts.net/blotter --toke
 
 The token file and cursor directory are **local host configuration**. Substitute
 real, private paths in the host's MCP configuration; never put token values in
-arguments, JSON tool calls, logs, shell transcripts, or this repository. Only
-the pinned HTTPS tailnet endpoint is accepted by the CLI. The older plaintext
-loopback endpoint is deliberately not allowlisted: any process winning that
-port could otherwise receive the bearer token. The token is bound by the
-server to the fixed `--actor`; tools cannot change either.
+arguments, JSON tool calls, logs, shell transcripts, or this repository. By
+default only the source-pinned Lappy HTTPS tailnet endpoint is accepted. The
+older plaintext loopback endpoint is deliberately not allowlisted: any process
+winning that port could otherwise receive the bearer token. The token is bound
+by the server to the fixed `--actor`; tools cannot change either.
+
+### Operator-approved NAS migration endpoint (POSIX hosts only)
+
+For a separately authorized, exact private NAS address, the host operator can
+place **one URL** in a regular, owner-only (0600), single-link file. The file
+must contain a canonical `https://<hostname>.<tailnet>.ts.net/blotter` URL.
+Launch the adapter with the same `--url` and `--pinned-url-file` pointing to the
+protected file:
+
+```sh
+blotter-mcp --actor bt2.one \
+  --url https://nas.example-tailnet.ts.net/blotter \
+  --pinned-url-file /private/blotter/trusted-endpoint \
+  --token-file /private/blotter/agent.token \
+  --state-dir /private/blotter/cursors
+```
+
+The URL and paths above are placeholders, not a verified installation. The
+operator must first establish and verify the NAS endpoint, certificate,
+credential scope and local file permissions. The private pin **replaces** the
+source-pinned default; it does not permit arbitrary additional URLs. The MCP
+tool schemas accept no URL or pin-file arguments, and the adapter rejects a
+mismatched destination **before reading the bearer token**. It still bypasses
+ambient HTTP(S) proxies and verifies HTTPS without following redirects.
+
+On Windows, external endpoint files currently **fail closed** because a
+handle-bound ACL verification for such files has not been qualified. The
+source-pinned Lappy default remains supported. Do not weaken the pin to an
+environment wildcard to make migration appear complete.
+
+Moving from Lappy to the NAS also changes the endpoint URL stored with the
+actor's durable hash-bound cursor. Preserve the authoritative ledger and
+reconcile/re-enroll cursor state deliberately; the adapter never resets the
+cursor or accepts a substituted ledger automatically. This source option
+does not migrate data, deploy a NAS service, or install a ChatGPT connector.
 
 The adapter supports the classic MCP `2025-06-18` stdio initialization,
 `tools/list` and `tools/call`, with UTF-8 newline-delimited JSON-RPC and no
@@ -86,5 +121,5 @@ default probe is read-only. An append/read-back probe requires the explicit
 To qualify an installation: mount the local process in a supported MCP host;
 check the actual advertised tools; call `begin_turn`, `latest20`, and
 `record_activity`; then independently read back the appended event from the
-central Lappy ledger, preserving hashes and event IDs. Do not infer connection
+one authoritative ledger, preserving hashes and event IDs. Do not infer connection
 from repository presence alone.

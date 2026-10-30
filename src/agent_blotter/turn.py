@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 from .remote import RemoteBlotter
@@ -38,9 +39,22 @@ def _exclusive_cursor(lock_path: Path):
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
 def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: int = 100,
-               re_enroll_legacy: bool = False) -> dict:
+               re_enroll_legacy: bool = False, rebind_same_ledger: bool = False,
+               source_head_seq: int | None = None,
+               source_head_hash: str | None = None) -> dict:
     """Read all unseen global events and persist an actor-specific cursor."""
     if not 2 <= limit <= 100: raise BlotterError("page limit must be 2..100")
+    # A URL change is not evidence of a different ledger, but the reverse is
+    # equally important: a matching old cursor prefix alone does not prove a
+    # full copy rather than a diverged fork. Require the independently verified
+    # source snapshot's head sequence and hash before an explicit cutover.
+    if rebind_same_ledger:
+        if (type(source_head_seq) is not int or source_head_seq < 1 or
+                not isinstance(source_head_hash, str) or
+                re.fullmatch(r"[0-9a-f]{64}", source_head_hash) is None):
+            raise BlotterError("same-ledger URL cutover requires verified source head sequence/hash")
+    elif source_head_seq is not None or source_head_hash is not None:
+        raise BlotterError("source head proof requires explicit same-ledger URL cutover")
     actor = _valid_id(client.actor, "actor")
     folder = Path(state_dir)
     folder.mkdir(parents=True, exist_ok=True)
@@ -63,15 +77,37 @@ def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: i
     with _exclusive_cursor(folder / (cursor_key + ".lock")):
         cursor = 0
         cursor_hash = GENESIS
+        rebind_needed = False
         if path.exists():
             saved = json.loads(path.read_text(encoding="utf-8"))
-            if (not isinstance(saved, dict) or saved.get("url") != client.url
+            if (not isinstance(saved, dict) or
+                    not isinstance(saved.get("url"), str) or not saved["url"]
                     or type(saved.get("cursor")) is not int or saved["cursor"] < 0
                     or not isinstance(saved.get("cursor_hash"), str)
                     or len(saved["cursor_hash"]) != 64):
                 raise BlotterError("cursor belongs to another ledger or is invalid")
             cursor = saved["cursor"]
             cursor_hash = saved["cursor_hash"]
+            rebind_needed = saved.get("url") != client.url
+            if rebind_needed and not rebind_same_ledger:
+                raise BlotterError("cursor belongs to another ledger or is invalid")
+        elif rebind_same_ledger:
+            raise BlotterError("same-ledger URL cutover requires an existing cursor")
+        if rebind_same_ledger and not rebind_needed:
+            raise BlotterError("same-ledger URL cutover requires a changed endpoint")
+        if rebind_needed:
+            if source_head_seq < cursor:
+                raise BlotterError("verified source head predates saved cursor")
+            # POST /v1/check checks the hash at the *source snapshot head*
+            # transactionally before writing its own marker. A mismatch writes
+            # nothing and the original bound cursor remains untouched.
+            proof = client.check(session=session, after_seq=source_head_seq,
+                                 limit=2, expected_after_hash=source_head_hash)
+            if (type(proof.get("visible_head_seq")) is not int or
+                    proof["visible_head_seq"] < source_head_seq or
+                    type(proof.get("next_seq")) is not int or
+                    proof["next_seq"] <= source_head_seq):
+                raise BlotterError("new endpoint did not confirm source head continuity")
         start = cursor
         seen = []
         pages = 0
@@ -122,6 +158,12 @@ def main(argv: list[str] | None = None) -> int:
     begin.add_argument("--limit", type=int, default=100)
     begin.add_argument("--re-enroll-legacy", action="store_true",
                        help="explicitly reset a legacy actor cursor and reread full history")
+    begin.add_argument("--rebind-same-ledger", action="store_true",
+                       help="explicitly rebind URL after a verified source-ledger cutover")
+    begin.add_argument("--source-head-seq", type=int,
+                       help="verified quiesced source snapshot head sequence")
+    begin.add_argument("--source-head-hash",
+                       help="verified quiesced source snapshot SHA-256 chain head")
     record = sub.add_parser("record")
     record.add_argument("--session", required=True)
     record.add_argument("--kind", required=True)
@@ -150,7 +192,10 @@ def main(argv: list[str] | None = None) -> int:
                               direct_only=True)
         if args.command == "begin":
             value = begin_turn(client,Path(args.state_dir),session=args.session,
-                               limit=args.limit,re_enroll_legacy=args.re_enroll_legacy)
+                               limit=args.limit,re_enroll_legacy=args.re_enroll_legacy,
+                               rebind_same_ledger=args.rebind_same_ledger,
+                               source_head_seq=args.source_head_seq,
+                               source_head_hash=args.source_head_hash)
         else:
             value = client.record(session=args.session,kind=args.kind,
                                   message=args.message,evidence=args.evidence,

@@ -113,3 +113,29 @@ unseen shared events, then persists an actor-specific cursor for the next turn.
 Invoke begin every turn and record for every actual action. The cursor now includes a historical hash checkpoint; older un-hashed cursor files are incompatible: the client refuses to silently reuse or discard detected legacy cursors. After reviewing or archiving prior cursor state and accepting a complete history replay, start explicitly with `blotter-turn --actor <actor> begin --session <session> --re-enroll-legacy` (plus the usual URL/token options). Do not transplant a cursor between ledger snapshots. See the
 [private Lappy deployment](docs/LAPPY_DEPLOYMENT_20261009.md).
 Installing the service does not automatically hook unrelated agent runtimes.
+
+## Optional host integrations and NAS deployment
+
+The following additions are **source candidates, not deployed or runtime-qualified**:
+
+- [Synology deployment](docs/SYNOLOGY_DEPLOYMENT.md) describes an optional
+  one-writer NAS service, private networking, verified backup and controlled
+  Lappy cutover. It requires a compatible NAS and an independently qualified
+  TLS endpoint; no public port is configured.
+- [MCP stdio adapter](docs/MCP_STDIO.md) retains its fixed Lappy default and
+  supports an operator-owned exact HTTPS tailnet pin file on POSIX. The
+  corresponding [turn cursor contract](docs/AGENT_TURN_CONTRACT.md) documents
+  an explicit, hash-checked same-ledger endpoint migration.
+- [OpenAI Agents SDK hooks](integrations/agents_sdk/README.md) provide an
+  optional, packaged observer for application-owned runners. Its records
+  reflect only host-observed lifecycle events; a checked backlog is not
+  automatically supplied to the model.
+- [Codex desktop hooks](integrations/codex/README.md) offer an opt-in plugin
+  source bundle for a trusted local desktop runtime. They do not provide
+  complete cursor catch-up or native ChatGPT web instrumentation.
+
+These paths do not install a ChatGPT connector, establish access from an
+external runtime, or prove that every agent checks and records each turn.
+Keep each actor credential-bound to a separate trusted identity, avoid raw
+tool outputs and secrets in the shared log, and qualify read/write behavior
+against the *one* authoritative ledger before making operational claims.
