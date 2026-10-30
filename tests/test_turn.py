@@ -119,8 +119,11 @@ class TurnTests(unittest.TestCase):
         cursor = next(self.state.glob("actor-*.json"))
         original = cursor.read_bytes()
         fork_path = Path(self.temp.name) / "forked.sqlite3"
-        with sqlite3.connect(str(self.db.path)) as source, \
-                sqlite3.connect(str(fork_path)) as destination:
+        # sqlite3.Connection's context manager commits/rolls back but does
+        # not close the handle. Windows cannot delete the temporary fork DB
+        # during tearDown while either backup connection remains open.
+        with contextlib.closing(sqlite3.connect(str(self.db.path))) as source, \
+                contextlib.closing(sqlite3.connect(str(fork_path))) as destination:
             source.backup(destination)
         fork = Blotter(fork_path)
         self.assertEqual(fork.verify()["head_hash"], first["cursor_hash"])
