@@ -144,12 +144,18 @@ class CodexHookTests(unittest.TestCase):
     def test_unconfigured_cli_warns_without_attempting_write(self):
         event = {"hook_event_name": "Stop", "session_id": "s", "turn_id": "t"}
         root = HOOK.parents[3]
+        # Keep the OS process environment (notably SystemRoot on Windows,
+        # which some Python versions require during interpreter startup),
+        # while making the Blotter hook deliberately unconfigured.
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.upper().startswith("BLOTTER_")}
+        environment["PYTHONPATH"] = str(root / "src")
         result = subprocess.run([sys.executable, str(HOOK)],
                                 input=json.dumps(event), text=True,
                                 capture_output=True,
-                                env={"PYTHONPATH": str(root / "src")},
+                                env=environment,
                                 timeout=5, check=False)
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         warning = json.loads(result.stdout)
         self.assertIn("not verify", warning["systemMessage"])
         self.assertEqual(result.stderr, "")
