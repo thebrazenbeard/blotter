@@ -1,4 +1,4 @@
-import contextlib,io,json,os,tempfile,threading,unittest
+import contextlib,io,json,os,sqlite3,tempfile,threading,unittest
 from pathlib import Path
 from unittest import mock
 from agent_blotter import Blotter, BlotterError
@@ -60,6 +60,107 @@ class TurnTests(unittest.TestCase):
         begin_turn(self.one,self.state,session="a")
         wrong=RemoteBlotter("http://127.0.0.1:19083",actor="agent.one",token="A"*40)
         with self.assertRaises(BlotterError):begin_turn(wrong,self.state,session="b")
+
+    def test_explicit_same_ledger_url_cutover_requires_source_head_proof(self):
+        """A new endpoint is accepted only after source-head hash continuity."""
+        first = begin_turn(self.one, self.state, session="before")
+        action = self.one.record(kind="tool.executed", message="pre-cutover action")
+        source = self.db.verify()
+        self.assertTrue(source["ok"])
+        second_server = create_server(
+            self.db, {"A" * 40: "agent.one", "B" * 40: "agent.two"}, port=0)
+        thread = threading.Thread(target=second_server.serve_forever,
+                                  kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        try:
+            target = RemoteBlotter(f"http://127.0.0.1:{second_server.server_port}",
+                                   actor="agent.one", token="A" * 40)
+            result = begin_turn(
+                target, self.state, session="after", rebind_same_ledger=True,
+                source_head_seq=source["count"], source_head_hash=source["head_hash"])
+            self.assertEqual(result["previous_cursor"], first["cursor"])
+            self.assertIn(action["id"], [event["id"] for event in result["events"]])
+            saved = json.loads(next(self.state.glob("actor-*.json")).read_text())
+            self.assertEqual(saved["url"], target.url)
+            self.assertTrue(self.db.verify()["ok"])
+        finally:
+            second_server.shutdown()
+            second_server.server_close()
+            thread.join(timeout=5)
+
+    def test_cutover_rejects_wrong_source_head_without_changing_cursor(self):
+        begin_turn(self.one, self.state, session="before")
+        cursor = next(self.state.glob("actor-*.json"))
+        original = cursor.read_bytes()
+        source = self.db.verify()
+        replacement = Blotter(Path(self.temp.name) / "other-ledger.sqlite3")
+        replacement.record(actor="agent.two", kind="test.executed",
+                           message="different history")
+        second_server = create_server(replacement, {"A" * 40: "agent.one"}, port=0)
+        thread = threading.Thread(target=second_server.serve_forever,
+                                  kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        try:
+            target = RemoteBlotter(f"http://127.0.0.1:{second_server.server_port}",
+                                   actor="agent.one", token="A" * 40)
+            with self.assertRaisesRegex(BlotterError, "history mismatch"):
+                begin_turn(target, self.state, session="bad", rebind_same_ledger=True,
+                           source_head_seq=source["count"],
+                           source_head_hash=source["head_hash"])
+            self.assertEqual(cursor.read_bytes(), original)
+            self.assertEqual(replacement.verify()["count"], 1)
+        finally:
+            second_server.shutdown()
+            second_server.server_close()
+            thread.join(timeout=5)
+
+    def test_cutover_rejects_fork_after_matching_saved_cursor_prefix(self):
+        first = begin_turn(self.one, self.state, session="before")
+        cursor = next(self.state.glob("actor-*.json"))
+        original = cursor.read_bytes()
+        fork_path = Path(self.temp.name) / "forked.sqlite3"
+        with sqlite3.connect(str(self.db.path)) as source, \
+                sqlite3.connect(str(fork_path)) as destination:
+            source.backup(destination)
+        fork = Blotter(fork_path)
+        self.assertEqual(fork.verify()["head_hash"], first["cursor_hash"])
+        self.one.record(kind="tool.executed", message="source branch")
+        source_head = self.db.verify()
+        fork.record(actor="agent.two", kind="tool.executed",
+                    message="unrelated fork branch")
+        self.assertEqual(source_head["count"], fork.verify()["count"])
+        self.assertNotEqual(source_head["head_hash"], fork.verify()["head_hash"])
+        second_server = create_server(fork, {"A" * 40: "agent.one"}, port=0)
+        worker = threading.Thread(target=second_server.serve_forever,
+                                  kwargs={"poll_interval": 0.01}, daemon=True)
+        worker.start()
+        try:
+            target = RemoteBlotter(f"http://127.0.0.1:{second_server.server_port}",
+                                   actor="agent.one", token="A" * 40)
+            with self.assertRaisesRegex(BlotterError, "history mismatch"):
+                begin_turn(target, self.state, session="bad", rebind_same_ledger=True,
+                           source_head_seq=source_head["count"],
+                           source_head_hash=source_head["head_hash"])
+            self.assertEqual(cursor.read_bytes(), original)
+            self.assertEqual(fork.verify()["count"], source_head["count"])
+        finally:
+            second_server.shutdown()
+            second_server.server_close()
+            worker.join(timeout=5)
+
+    def test_cutover_missing_source_proof_rejects_before_any_network_write(self):
+        begin_turn(self.one, self.state, session="before")
+        cursor = next(self.state.glob("actor-*.json"))
+        original = cursor.read_bytes()
+        class Unreachable:
+            actor = "agent.one"
+            url = "https://new-endpoint.ts.net/blotter"
+            def check(self, **kwargs):
+                raise AssertionError("unproven migration must not contact endpoint")
+        with self.assertRaisesRegex(BlotterError, "source head"):
+            begin_turn(Unreachable(), self.state, session="bad",
+                       rebind_same_ledger=True)
+        self.assertEqual(cursor.read_bytes(), original)
     def test_safe_reverse_proxy_path(self):
         good=RemoteBlotter("https://example.ts.net/blotter",actor="agent.one",token="A"*40)
         self.assertEqual(good.url,"https://example.ts.net/blotter")
@@ -228,6 +329,20 @@ class TurnCliCredentialTests(unittest.TestCase):
         self.assertEqual(json.loads(out), {"ok": True})
         factory.assert_called_once_with(
             self.url, actor="agent.vn2", token="T" * 40, direct_only=True)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX private token file")
+    def test_explicit_cutover_cli_forwards_source_head_evidence(self):
+        args = ("--actor", "agent.vn2", "--token-file", str(self.token_file),
+                "begin", "--session", "cutover", "--rebind-same-ledger",
+                "--source-head-seq", "42", "--source-head-hash", "a" * 64)
+        with mock.patch("agent_blotter.turn.begin_turn", return_value={"cursor": 43}) as call:
+            rc, out, err, factory = self.invoke(*args)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out), {"cursor": 43})
+        self.assertEqual(call.call_args.kwargs["rebind_same_ledger"], True)
+        self.assertEqual(call.call_args.kwargs["source_head_seq"], 42)
+        self.assertEqual(call.call_args.kwargs["source_head_hash"], "a" * 64)
+        factory.assert_called_once()
 
     @unittest.skipUnless(os.name == "posix", "POSIX private token file")
     def test_group_world_readable_file_rejected_without_network(self):

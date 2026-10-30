@@ -296,6 +296,74 @@ class StdioAdapterTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 _validate_config_url(url)
 
+    def test_private_operator_pin_allows_only_exact_nas_tailnet_endpoint(self):
+        if os.name != "posix":
+            self.skipTest("operator pin files require POSIX descriptor-bound permissions")
+        trusted = "https://nas.tail86ea75.ts.net/blotter"
+        pin = Path(self.temp.name) / "trusted-endpoint"
+        pin.write_text(trusted + "\n", encoding="ascii")
+        pin.chmod(0o600)
+        self.assertEqual(_validate_config_url(trusted, pin_file=pin), trusted)
+        for destination in ("https://attacker.example/blotter",
+                            trusted + "/../evil", trusted + "?forward=1",
+                            "http://nas.tail86ea75.ts.net/blotter"):
+            with self.subTest(destination=destination), self.assertRaises(ValueError):
+                _validate_config_url(destination, pin_file=pin)
+
+    def test_operator_pin_rejects_unsafe_file_and_non_tailnet_destination(self):
+        if os.name != "posix":
+            self.skipTest("operator pin files require POSIX descriptor-bound permissions")
+        pin = Path(self.temp.name) / "trusted-endpoint"
+        pin.write_text("https://attacker.example/blotter\n", encoding="ascii")
+        pin.chmod(0o600)
+        with self.assertRaises(ValueError):
+            _validate_config_url("https://attacker.example/blotter", pin_file=pin)
+        pin.write_text("https://nas.tail86ea75.ts.net/blotter\n", encoding="ascii")
+        pin.chmod(0o644)
+        with self.assertRaises(ValueError):
+            _validate_config_url("https://nas.tail86ea75.ts.net/blotter", pin_file=pin)
+        pin.chmod(0o600)
+        link = Path(self.temp.name) / "link"
+        link.symlink_to(pin)
+        with self.assertRaises(ValueError):
+            _validate_config_url("https://nas.tail86ea75.ts.net/blotter", pin_file=link)
+        duplicate = Path(self.temp.name) / "hardlink"
+        os.link(pin, duplicate)
+        with self.assertRaises(ValueError):
+            _validate_config_url("https://nas.tail86ea75.ts.net/blotter", pin_file=pin)
+
+    def test_untrusted_pin_rejected_before_bearer_token_is_read(self):
+        if os.name != "posix":
+            self.skipTest("operator pin files require POSIX descriptor-bound permissions")
+        pin = Path(self.temp.name) / "untrusted-endpoint"
+        pin.write_text("https://attacker.example/blotter\n", encoding="ascii")
+        pin.chmod(0o600)
+        with mock.patch("agent_blotter.mcp_stdio._load_token_file") as read_token, \
+             mock.patch("agent_blotter.mcp_stdio.RemoteBlotter") as remote:
+            self.assertEqual(mcp_main(["--actor", "bt2.one", "--url",
+                                       "https://attacker.example/blotter",
+                                       "--pinned-url-file", str(pin),
+                                       "--token-file", "private.token"]), 2)
+        read_token.assert_not_called()
+        remote.assert_not_called()
+
+    def test_cli_private_pin_keeps_direct_only_and_binds_actor(self):
+        if os.name != "posix":
+            self.skipTest("operator pin files require POSIX descriptor-bound permissions")
+        trusted = "https://nas.tail86ea75.ts.net/blotter"
+        pin = Path(self.temp.name) / "trusted-endpoint"
+        pin.write_text(trusted + "\n", encoding="ascii")
+        pin.chmod(0o600)
+        with mock.patch("agent_blotter.mcp_stdio._load_token_file", return_value="T" * 40), \
+             mock.patch("agent_blotter.mcp_stdio.RemoteBlotter") as remote, \
+             mock.patch("agent_blotter.mcp_stdio.BlotterMCP"):
+            self.assertEqual(mcp_main(["--actor", "bt2.one", "--url", trusted,
+                                      "--pinned-url-file", str(pin),
+                                      "--token-file", "private.token"]), 0)
+            self.assertEqual(remote.call_args.args[0], trusted)
+            self.assertEqual(remote.call_args.kwargs["actor"], "bt2.one")
+            self.assertTrue(remote.call_args.kwargs["direct_only"])
+
 
 class AuthenticatedRemoteIntegrationTests(unittest.TestCase):
     def test_mcp_real_remote_identity_and_backend_redaction(self):

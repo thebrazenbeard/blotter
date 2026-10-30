@@ -34,3 +34,41 @@ in an authorized private process and emit only redacted counts, cursor/hash
 metadata, and verification results. Pre-provision private cursor storage
 (POSIX `0700` directory; Windows verified restrictive DACL); avoid a second
 local ledger or automatic cursor reset.
+
+## Explicit endpoint cutover with verified source history
+
+Changing `BLOTTER_URL` alone **does not** rebind a saved actor cursor. The
+default `blotter-turn begin` still rejects a cursor from another URL, even if
+the new endpoint serves a copy of the same database. This is intentional.
+
+After an operator has stopped the old writer, taken a SQLite-consistent source
+snapshot, and independently verified its **final** `blotter verify` result
+(`count` and `head_hash`), the operator can explicitly transfer the cursor
+binding to the new approved endpoint. First verify that the restored service
+uses the same ledger and that credentials, transport trust, and NAS storage are
+properly configured. Do not run independently writable old and new ledgers.
+
+```text
+blotter-turn --actor AGENT --state-dir PRIVATE_CURSORS begin --session CUTOVER_TURN \
+  --rebind-same-ledger --source-head-seq VERIFIED_COUNT \
+  --source-head-hash VERIFIED_HEAD_HASH
+```
+
+The command requires the operator-provisioned `BLOTTER_URL` for the new host
+and the actor's ordinary private token. The supplied count and hash **must be
+copied from the independently verified, quiesced source database**, not
+invented or derived from the new endpoint. The client asks the new server to
+validate the source head sequence/hash transactionally before it catches up
+from the actor's existing cursor. If that check fails, the original cursor
+file is retained; it is never silently reset. A successful catch-up atomically
+stores the new URL and new hash-bound cursor. A successful proof check itself
+adds one `turn.checked` marker on the new ledger; subsequent failures may
+leave that marker even while the local cursor remains unchanged.
+
+This proves continuity to the supplied source checkpoint **assuming the
+operator's source snapshot evidence is genuine**. It is not independent
+attestation of the old machine, a certificate of a trusted database writer,
+or proof that both hosts cannot append concurrently. Verify the migration
+with an independent readback and keep the former writer disabled. Ordinary
+agents and MCP tool inputs must not be able to set cutover flags or replace
+the trusted destination or actor credential.

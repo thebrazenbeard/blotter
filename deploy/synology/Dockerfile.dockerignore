@@ -1,0 +1,10 @@
+# The Docker build context is the repository root. Keep private runtime
+# directories, non-Python files, .git history, and credentials out of it.
+# Untracked *.py files under the package are still included; keep private
+# material out of source directories and inspect the build context.
+**
+!README.md
+!pyproject.toml
+!src/
+!src/agent_blotter/
+!src/agent_blotter/*.py

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from typing import Any, BinaryIO
+from urllib.parse import urlsplit
 
 from .remote import RemoteBlotter
 from .store import BlotterError, EVIDENCE, EFFECTS, _valid_id
@@ -32,13 +33,74 @@ MAX_BEGIN_PAGES = 40
 MAX_BEGIN_SECONDS = 30.0
 # Local per-process limits; the central service remains the authority.
 PER_MINUTE = {"begin_turn": 60, "latest20": 10, "record_activity": 300}
-# Endpoint choices are fixed at source. A model-provided tool argument cannot
-# replace them. Keep the plaintext endpoint confined to Lappy's local loopback.
+# The historic endpoint remains the secure default. A future migration may
+# select one exact tailnet URL through an operator-owned private POSIX file;
+# model-provided MCP tool arguments can change neither URL nor trust policy.
 PINNED_BLOTTER_URLS = frozenset({"https://lappy.tail86ea75.ts.net/blotter"})
 
 
-def _validate_config_url(url: str) -> str:
-    if type(url) is not str or url not in PINNED_BLOTTER_URLS:
+def _valid_tailnet_endpoint(url: str) -> bool:
+    """Require a canonical HTTPS tailnet destination and exact service path."""
+    if type(url) is not str or len(url) > 512:
+        return False
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    if not host or url != f"https://{host}/blotter":
+        return False
+    labels = host.split(".")
+    if len(labels) < 4 or labels[-2:] != ["ts", "net"]:
+        return False
+    return all(1 <= len(label) <= 63 and label[0].isalnum()
+               and label[-1].isalnum() and label.isascii()
+               and all(char.isascii() and (char.isalnum() or char == "-") for char in label)
+               for label in labels[:-2])
+
+
+def _read_private_pinned_url(path: Path) -> str:
+    """Read an exact operator-approved endpoint from an owner-only POSIX file.
+
+    Use the opened file descriptor for mode/ownership checks, avoiding a
+    symlink and check-to-open race. Windows requires a separate reviewed
+    handle-bound ACL implementation before external endpoint pin files work.
+    """
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("private Blotter endpoint pin unavailable on this OS")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                     | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise ValueError("private Blotter endpoint pin unavailable") from exc
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077 or info.st_nlink != 1):
+            raise ValueError("private Blotter endpoint pin permissions unsafe")
+        with os.fdopen(fd, "rb") as opened:
+            fd = -1
+            contents = opened.read(1025)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    try:
+        raw = contents.decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError("private Blotter endpoint pin invalid") from exc
+    if len(contents) > 1024 or raw.count("\n") > 1 or "\r" in raw:
+        raise ValueError("private Blotter endpoint pin invalid")
+    url = raw.removesuffix("\n")
+    if not _valid_tailnet_endpoint(url):
+        raise ValueError("private Blotter endpoint pin invalid")
+    return url
+
+
+def _validate_config_url(url: str, *, pin_file: Path | None = None) -> str:
+    trusted = (_read_private_pinned_url(Path(pin_file)) if pin_file is not None
+               else None)
+    if type(url) is not str or (trusted is None and url not in PINNED_BLOTTER_URLS) \
+            or (trusted is not None and url != trusted):
         raise ValueError("Blotter endpoint is not in the fixed allowlist")
     return url
 
@@ -419,10 +481,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--actor", required=True, help="credential-bound Blotter actor")
     parser.add_argument("--token-file", required=True, help="private local token file path")
     parser.add_argument("--url", default="https://lappy.tail86ea75.ts.net/blotter")
+    parser.add_argument("--pinned-url-file", type=Path,
+                        help="operator-owned private POSIX file containing one exact tailnet HTTPS endpoint")
     parser.add_argument("--state-dir", default=str(Path.home() / ".blotter" / "cursors"))
     args = parser.parse_args(argv)
     try:
-        url = _validate_config_url(args.url)
+        url = _validate_config_url(args.url, pin_file=args.pinned_url_file)
         actor = _valid_id(args.actor, "actor")
         token = _load_token_file(Path(args.token_file))
         # MCP transport is bound to the private tailnet; bypass host proxies.

@@ -1,0 +1,37 @@
+services:
+  blotter:
+    build:
+      context: ../..
+      dockerfile: deploy/synology/Dockerfile
+    image: local/agent-blotter:synology-source
+    # Linux host networking lets Blotter bind 127.0.0.1 on the NAS itself.
+    # Never change this to 0.0.0.0/plain HTTP or publish the port to the LAN.
+    network_mode: host
+    user: "${BLOTTER_UID:?set the private-data owner UID}:${BLOTTER_GID:?set the private-data owner GID}"
+    command:
+      - --db
+      - /srv/blotter/activity.sqlite3
+      - --credentials
+      - /run/blotter/agents.json
+      - --host
+      - 127.0.0.1
+      - --port
+      - "${BLOTTER_LOOPBACK_PORT:-8832}"
+    volumes:
+      - type: bind
+        source: "${BLOTTER_DATA_DIR:?set an absolute local NAS data directory}"
+        target: /srv/blotter
+      - type: bind
+        source: "${BLOTTER_CREDENTIALS_FILE:?set an absolute private JSON file path}"
+        target: /run/blotter/agents.json
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 60s
