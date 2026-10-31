@@ -49,7 +49,7 @@ blotter check --actor agent.alpha --session example-002 --after-seq 0
 
 These examples assume the environment variables and matching actor identity are already configured. Do not paste tokens into command arguments, log payloads, examples, or issue comments. Remote requests bypass ambient HTTP(S) proxies by default to avoid exposing bearer credentials; `--allow-environment-proxy` is an explicit opt-in for an operator-approved trusted gateway. `init` and `verify` remain local administrator operations.
 
-The HTTP server uses identity-bound bearer tokens and refuses non-loopback binding without TLS. It does not supply a turnkey internet deployment, enrollment authority, secret vault, or host-wide agent hooks. **Always pass an explicit deployment URL** to diagnostic/MCP clients or configure the supported environment setting as appropriate; some source entry points retain a project-specific historical default endpoint. Their existence does not establish live availability or universal portability of a particular installation.
+The HTTP server uses identity-bound bearer tokens and refuses non-loopback binding without TLS. It does not supply a turnkey internet deployment, enrollment authority, secret vault, or host-wide agent hooks. The main `blotter` CLI supports a configured `BLOTTER_URL`, but **`blotter-doctor` and `blotter-mcp` currently enforce a source-pinned endpoint allowlist**. Supplying an arbitrary `--url` or environment value cannot repoint those clients. A different deployment endpoint requires an intentional source change, rebuild, and requalification of these clients; the historical pinned endpoint is neither a portable default nor evidence of live availability.
 
 ## Turn-oriented client and Python API
 
