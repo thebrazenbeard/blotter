@@ -90,6 +90,23 @@ class ResponseBoundsTests(unittest.TestCase):
         self.client._opener = _Opener(_Response(b'{"ok":true}'))
         self.assertEqual(self.client.health(), {"ok": True})
 
+    def test_duplicate_and_nonfinite_read_responses_have_no_verified_result(self):
+        # An untrusted reverse proxy or stale server must not make an
+        # ambiguous JSON response look like a trustworthy ledger observation.
+        for body in (b'{"ok":true,"ok":false}',
+                     b'{"events":[{"seq":1,"seq":2}]}',
+                    b'{"ok":NaN}', b'{"ok":Infinity}', b'{"ok":1e309}'):
+            with self.subTest(body=body):
+                self.client._opener = _Opener(_Response(body))
+                with self.assertRaisesRegex(BlotterError, "no read result"):
+                    self.client.health()
+
+    def test_duplicate_record_response_is_ambiguous_write(self):
+        self.client._opener = _Opener(_Response(
+            b'{"id":"stable","id":"forged","seq":1}'))
+        with self.assertRaisesRegex(BlotterError, "write outcome may be unknown"):
+            self.client.record(kind="tool.executed", message="one", event_id="stable")
+
     def test_http_error_body_does_not_read_without_limit(self):
         content = b'{"error":"' + b"X" * (2 * 1024 * 1024) + b'"}'
         fp = _Response(content)

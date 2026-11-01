@@ -159,7 +159,12 @@ class Blotter:
         for source_id in sources:
             _valid_id(source_id, "source_id")
         base = {
-            "v": SCHEMA_VERSION, "id": _valid_id(event_id, "event_id") if event_id else str(uuid.uuid4()),
+            # Only omitted IDs may be generated. An explicit false-y value
+            # must fail validation rather than lose caller retry identity.
+            "v": SCHEMA_VERSION, "id": (
+                _valid_id(event_id, "event_id") if event_id is not None
+                else str(uuid.uuid4())
+            ),
             "actor": actor, "kind": kind, "session": session, "level": level,
             "evidence": evidence, "message": message, "payload": _redact(payload),
             "source_ids": sources, "effect": effect, "correlation_id": correlation_id,
