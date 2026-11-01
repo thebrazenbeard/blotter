@@ -65,6 +65,18 @@ class BlotterTests(unittest.TestCase):
             self.note(event_id="stable-1", payload={"n": 3})
         self.assertEqual(self.ledger.verify()["count"], 1)
 
+    def test_explicit_falsey_event_id_never_silently_generates_fresh_id(self):
+        # Ambiguous writes must be retried with the SAME explicit identity.
+        # A caller-supplied invalid value must not silently switch to a random
+        # UUID and cause a second append on the next attempt.
+        for invalid in ("", 0, False, [], {}):
+            with self.subTest(invalid=invalid), self.assertRaises(BlotterError):
+                self.note(event_id=invalid)
+        self.assertEqual(self.ledger.verify()["count"], 0)
+        first = self.note(event_id=None)
+        second = self.note(event_id=None)
+        self.assertNotEqual(first["id"], second["id"])
+
     def test_redaction_and_export(self):
         ev = self.note(payload={"password": "secret", "token": "secret-token", "nested": [{"api_key": "hidden"}]})
         self.assertEqual(ev["payload"]["password"], "[REDACTED]")
