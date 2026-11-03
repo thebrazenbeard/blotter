@@ -3,6 +3,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from agent_blotter import Blotter, BlotterError, IntegrityError
 
@@ -116,9 +117,10 @@ class BlotterTests(unittest.TestCase):
     def test_check_rejects_modified_cursor_event_before_append(self):
         self.note(event_id="checkpoint-a")
         self.note(event_id="checkpoint-b")
-        with sqlite3.connect(self.ledger.path) as db:
-            prior_hash = db.execute("SELECT hash FROM events WHERE seq=1").fetchone()[0]
-            db.execute("UPDATE events SET body=? WHERE seq=1", ('{"seq":1}',))
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                prior_hash = db.execute("SELECT hash FROM events WHERE seq=1").fetchone()[0]
+                db.execute("UPDATE events SET body=? WHERE seq=1", ('{"seq":1}',))
         with self.assertRaises(IntegrityError):
             Blotter(self.ledger.path).check(actor="reader", after_seq=1,
                                             expected_after_hash=prior_hash)
@@ -127,20 +129,22 @@ class BlotterTests(unittest.TestCase):
     def test_check_rejects_modified_page_event_before_append(self):
         self.note(event_id="page-a")
         self.note(event_id="page-b")
-        with sqlite3.connect(self.ledger.path) as db:
-            db.execute("UPDATE events SET body=? WHERE seq=2", ('{"seq":2}',))
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                db.execute("UPDATE events SET body=? WHERE seq=2", ('{"seq":2}',))
         with self.assertRaises(IntegrityError):
             Blotter(self.ledger.path).check(actor="reader", after_seq=0)
         self.assertEqual(len(self.ledger.list()), 2)
 
     def test_check_rejects_noncanonical_json_without_digest_change(self):
         self.note(event_id="canonical-a")
-        with sqlite3.connect(self.ledger.path) as db:
-            body = db.execute("SELECT body FROM events WHERE seq=1").fetchone()[0]
-            # Duplicate seq parses to the same object, so merely recomputing
-            # the parsed JSON's digest would incorrectly accept this rewrite.
-            db.execute("UPDATE events SET body=? WHERE seq=1",
-                       (body[:-1] + ',"seq":1}',))
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                body = db.execute("SELECT body FROM events WHERE seq=1").fetchone()[0]
+                # Duplicate seq parses to the same object, so merely recomputing
+                # the parsed JSON's digest would incorrectly accept this rewrite.
+                db.execute("UPDATE events SET body=? WHERE seq=1",
+                           (body[:-1] + ',"seq":1}',))
         with self.assertRaises(IntegrityError):
             Blotter(self.ledger.path).check(actor="reader", after_seq=0)
         self.assertEqual(len(self.ledger.list()), 1)
