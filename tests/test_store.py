@@ -3,6 +3,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from agent_blotter import Blotter, BlotterError, IntegrityError
 
@@ -112,6 +113,65 @@ class BlotterTests(unittest.TestCase):
             db.close()
         with self.assertRaises(IntegrityError):
             self.ledger.verify()
+
+    def test_full_verify_rejects_noncanonical_event_bytes(self):
+        self.note(event_id="archive-a")
+        self.note(event_id="archive-b")
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                body = db.execute("SELECT body FROM events WHERE seq=1").fetchone()[0]
+                # The decoded event and existing stored digest remain equal;
+                # the actual stored bytes have nevertheless been rewritten.
+                db.execute("UPDATE events SET body=? WHERE seq=1",
+                           (body[:-1] + ',"seq":1}',))
+        with self.assertRaises(IntegrityError):
+            Blotter(self.ledger.path).verify()
+
+    def test_check_rejects_modified_cursor_event_before_append(self):
+        self.note(event_id="checkpoint-a")
+        self.note(event_id="checkpoint-b")
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                prior_hash = db.execute("SELECT hash FROM events WHERE seq=1").fetchone()[0]
+                db.execute("UPDATE events SET body=? WHERE seq=1", ('{"seq":1}',))
+        with self.assertRaises(IntegrityError):
+            Blotter(self.ledger.path).check(actor="reader", after_seq=1,
+                                            expected_after_hash=prior_hash)
+        self.assertEqual(len(self.ledger.list()), 2)
+
+    def test_check_rejects_modified_page_event_before_append(self):
+        self.note(event_id="page-a")
+        self.note(event_id="page-b")
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                db.execute("UPDATE events SET body=? WHERE seq=2", ('{"seq":2}',))
+        with self.assertRaises(IntegrityError):
+            Blotter(self.ledger.path).check(actor="reader", after_seq=0)
+        self.assertEqual(len(self.ledger.list()), 2)
+
+    def test_check_rejects_noncanonical_json_without_digest_change(self):
+        self.note(event_id="canonical-a")
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                body = db.execute("SELECT body FROM events WHERE seq=1").fetchone()[0]
+                # Duplicate seq parses to the same object, so merely recomputing
+                # the parsed JSON's digest would incorrectly accept this rewrite.
+                db.execute("UPDATE events SET body=? WHERE seq=1",
+                           (body[:-1] + ',"seq":1}',))
+        with self.assertRaises(IntegrityError):
+            Blotter(self.ledger.path).check(actor="reader", after_seq=0)
+        self.assertEqual(len(self.ledger.list()), 1)
+
+    def test_check_accepts_valid_cross_reader_hash_checkpoint(self):
+        self.note(event_id="stable-a")
+        first = self.ledger.check(actor="reader-one", after_seq=0)
+        self.note(event_id="stable-b")
+        second = Blotter(self.ledger.path).check(
+            actor="reader-two", after_seq=first["next_seq"],
+            expected_after_hash=first["next_hash"],
+        )
+        self.assertIn("stable-b", [event["id"] for event in second["events"]])
+        self.assertTrue(self.ledger.verify()["ok"])
 
     def test_concurrent_writers(self):
         def write(i):
