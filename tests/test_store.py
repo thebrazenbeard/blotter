@@ -114,6 +114,19 @@ class BlotterTests(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             self.ledger.verify()
 
+    def test_full_verify_rejects_noncanonical_event_bytes(self):
+        self.note(event_id="archive-a")
+        self.note(event_id="archive-b")
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                body = db.execute("SELECT body FROM events WHERE seq=1").fetchone()[0]
+                # The decoded event and existing stored digest remain equal;
+                # the actual stored bytes have nevertheless been rewritten.
+                db.execute("UPDATE events SET body=? WHERE seq=1",
+                           (body[:-1] + ',"seq":1}',))
+        with self.assertRaises(IntegrityError):
+            Blotter(self.ledger.path).verify()
+
     def test_check_rejects_modified_cursor_event_before_append(self):
         self.note(event_id="checkpoint-a")
         self.note(event_id="checkpoint-b")

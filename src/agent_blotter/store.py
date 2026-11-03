@@ -361,6 +361,11 @@ class Blotter:
                 count += 1
                 try:
                     event = json.loads(body)
+                    # Re-serializing parsed JSON alone would accept a body
+                    # rewritten with duplicate keys or irrelevant whitespace.
+                    # Full-chain verification must cover canonical stored bytes.
+                    if type(event) is not dict or _json(event) != body:
+                        raise ValueError("noncanonical event body")
                     calculated = _digest(previous, event)
                 except (ValueError, TypeError, BlotterError) as exc:
                     raise IntegrityError(f"invalid event at sequence {seq}") from exc
