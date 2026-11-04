@@ -123,7 +123,9 @@ def _read_windows_token_file_verified(path: Path) -> str:
 
     PowerShell 5.1 uses .NET Framework FileStream.GetAccessControl(), which
     evaluates the opened object, not a second lookup of a mutable filename.
-    FileShare.Read excludes concurrent write/delete handles while it is open.
+    The native handle rejects final-component reparse points and parent path
+    redirection before ACL/content access. FileShare.Read excludes concurrent
+    write/delete handles while it is open.
     The service-side credentials reader is a *separate* deployment gate.
     """
     script = r"""
@@ -136,6 +138,7 @@ using System;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 public static class BlotterNativeFile {
@@ -155,6 +158,10 @@ public static class BlotterNativeFile {
         SafeFileHandle handle, int informationClass,
         out FILE_ATTRIBUTE_TAG_INFO info, uint infoSize);
 
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern uint GetFinalPathNameByHandleW(
+        SafeFileHandle handle, StringBuilder path, uint size, uint flags);
+
     public static SafeFileHandle OpenNoReparse(string path) {
         // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT
         SafeFileHandle handle = CreateFileW(
@@ -173,6 +180,23 @@ public static class BlotterNativeFile {
             if ((info.FileAttributes & 0x400U) != 0) {
                 throw new IOException("Private token reparse point rejected");
             }
+            // OPEN_REPARSE_POINT covers only the final component. Refuse a
+            // parent junction/symlink whose resolved object is elsewhere.
+            string full = Path.GetFullPath(path);
+            string expected = full.StartsWith(@"\\?\", StringComparison.Ordinal)
+                ? full
+                : full.StartsWith(@"\\", StringComparison.Ordinal)
+                    ? @"\\?\UNC\" + full.Substring(2)
+                    : @"\\?\" + full;
+            StringBuilder actual = new StringBuilder(32768);
+            uint size = GetFinalPathNameByHandleW(handle, actual, (uint)actual.Capacity, 0);
+            if (size == 0 || size >= actual.Capacity) {
+                throw new IOException("Private token final path unavailable");
+            }
+            if (!String.Equals(expected, actual.ToString(),
+                    StringComparison.OrdinalIgnoreCase)) {
+                throw new IOException("Private token resolved parent path rejected");
+            }
             return handle;
         } catch {
             handle.Dispose();
@@ -189,6 +213,10 @@ try {
     if ($_.Exception.ToString().Contains('Private token reparse point rejected')) {
         [Console]::Error.WriteLine('Private token reparse point rejected')
         exit 8
+    }
+    if ($_.Exception.ToString().Contains('Private token resolved parent path rejected')) {
+        [Console]::Error.WriteLine('Private token resolved parent path rejected')
+        exit 9
     }
     throw
 }
