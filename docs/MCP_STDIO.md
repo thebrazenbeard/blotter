@@ -60,11 +60,15 @@ default probe is read-only. An append/read-back probe requires the explicit
   Windows PowerShell 5.1 helper opens one `FileStream` with read-only access
   and no write/delete sharing, evaluates its owner and allow ACEs through
   `FileStream.GetAccessControl()`, and reads the token bytes from **that same
-  stream**. This prevents a path replacement between a separate ACL preflight
-  and the credential read. It rejects a reparse-point file at the initial path
-  check; no claim is made that every ancestor junction can be excluded. The
-  helper returns bounded encoded bytes only to
-  its launching process; never log its standard output. The adapter does not
+  stream**. A native `CreateFileW` open with `FILE_FLAG_OPEN_REPARSE_POINT`
+  rejects a reparse-point leaf on the opened handle; `GetFinalPathNameByHandleW`
+  rejects a resolved path differing from the requested canonical DOS path,
+  including synthetic parent-directory symlink redirection. This prevents the
+  demonstrated file A/B ACL/read race and the tested ancestor redirection.
+  Intentionally legitimate path aliases may fail closed. This is not proof of
+  secure parent-directory ACLs, an unchanged file identity before open, or
+  arbitrary network/volume path qualification. The helper returns bounded
+  encoded bytes only to its launching process; never log its standard output. The adapter does not
   install or change ACLs. Host runtime and parent-directory access-control
   qualification are separate gates; the server credentials loader has its own
   distinct check/open risk.
