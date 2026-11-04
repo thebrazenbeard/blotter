@@ -19,14 +19,15 @@ MAX_CREDENTIAL_FILE_BYTES = 1_048_576
 
 def _read_posix_private_bytes(path: Path) -> bytes:
     """Walk from / using no-follow directory fds, then fstat/read one leaf fd."""
-    if not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")):
+    if not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK")):
         raise BlotterError("private credentials require no-follow descriptor support")
     full = Path(os.path.abspath(os.fspath(path)))
     parts = full.parts
     if not parts or parts[0] != os.sep or len(parts) < 2:
         raise BlotterError("credentials file path is invalid")
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    leaf_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    # O_NONBLOCK keeps a swapped FIFO/device from hanging before fstat rejects it.
+    leaf_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
     parent_fd = None
     file_fd = None
     try:
