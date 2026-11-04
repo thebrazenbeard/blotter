@@ -461,6 +461,65 @@ New-Item -ItemType SymbolicLink -Path $env:BLOTTER_MCP_TOKEN_PATH -Target $env:B
         self.assertNotEqual(staged_results[0].returncode, 0)
         self.assertIn("Private token reparse point rejected", staged_results[0].stderr)
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory-reparse semantics")
+    def test_real_windows_parent_reparse_redirect_is_rejected(self):
+        """Even a trusted-looking leaf token must reject a symlink ancestor.
+
+        Synthetic A/B files only; no actual actor token or host service.
+        """
+        root = Path(self.temp.name, "synthetic-parent-redirect")
+        parent = root / "original-parent"
+        target = root / "replacement-parent"
+        saved = root / "saved-original"
+        parent.mkdir(parents=True)
+        target.mkdir()
+        token_a = parent / "actor.token"
+        token_b = target / "actor.token"
+        token_a.write_text("A" * 40, encoding="utf-8")
+        token_b.write_text("B" * 40, encoding="utf-8")
+        acl_script = r"""
+$ErrorActionPreference = 'Stop'
+$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$security = [System.Security.AccessControl.FileSecurity]::new()
+$security.SetOwner($owner)
+$security.SetAccessRuleProtection($true, $false)
+$full = [System.Security.AccessControl.FileSystemRights]::FullControl
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($owner, $full, $allow))
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, $full, $allow))
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_PATH_A, $security)
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_PATH_B, $security)
+"""
+        setup = subprocess.run(
+            [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", acl_script],
+            env=dict(os.environ, BLOTTER_FIXTURE_PATH_A=str(token_a),
+                     BLOTTER_FIXTURE_PATH_B=str(token_b)),
+            capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(setup.returncode, 0, "synthetic private ACL fixture setup failed")
+        self.assertEqual(_load_token_file(token_a), "A" * 40)
+        parent.rename(saved)
+        try:
+            parent.symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("this Windows runner cannot create synthetic directory symlinks")
+        self.assertTrue(token_a.is_file())
+        self.assertFalse(token_a.is_symlink(), "the leaf must not itself be a symlink")
+
+        real_run = subprocess.run
+        results = []
+        def collect(command, **kwargs):
+            result = real_run(command, **kwargs)
+            results.append(result)
+            return result
+
+        with mock.patch("agent_blotter.mcp_stdio.subprocess.run", side_effect=collect):
+            with self.assertRaises(ValueError):
+                _load_token_file(token_a)
+        self.assertEqual(len(results), 1)
+        self.assertNotEqual(results[0].returncode, 0)
+        self.assertIn("Private token resolved parent path rejected", results[0].stderr)
+
     def test_pinned_urls_reject_credential_exfiltration_destinations(self):
         self.assertEqual(_validate_config_url(self.bridge.client.url), self.bridge.client.url)
         for url in ("https://attacker.example/blotter", "http://attacker.example",
