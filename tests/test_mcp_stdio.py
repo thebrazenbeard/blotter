@@ -383,6 +383,74 @@ if ($env:BLOTTER_FIXTURE_BROAD -eq 'yes') {
                 else:
                     self.assertEqual(_load_token_file(path), trusted)
 
+    @unittest.skipUnless(os.name == "nt", "requires actual Windows reparse semantics")
+    def test_real_windows_reparse_swap_after_preflight_is_rejected(self):
+        """Hostile A/B: a symlink replacing A at open must not yield B.
+
+        Only synthetic files under this test's disposable directory are touched.
+        The test inserts its interlock *into an in-memory PowerShell script* at
+        the open point; production source has no test-triggered interlock.
+        """
+        path_a = Path(self.temp.name, "synthetic-original-a.token")
+        path_b = Path(self.temp.name, "synthetic-swap-target-b.token")
+        backup = Path(self.temp.name, "synthetic-original-a.backup")
+        probe = Path(self.temp.name, "synthetic-probe-link")
+        path_a.write_text("A" * 40, encoding="utf-8")
+        path_b.write_text("B" * 40, encoding="utf-8")
+        try:
+            probe.symlink_to(path_b)
+        except (OSError, NotImplementedError):
+            self.skipTest("this Windows runner cannot create synthetic file symlinks")
+        finally:
+            if probe.is_symlink():
+                probe.unlink()
+
+        acl_script = r"""
+$ErrorActionPreference = 'Stop'
+$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$security = [System.Security.AccessControl.FileSecurity]::new()
+$security.SetOwner($owner)
+$security.SetAccessRuleProtection($true, $false)
+$full = [System.Security.AccessControl.FileSystemRights]::FullControl
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($owner, $full, $allow))
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, $full, $allow))
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_PATH_A, $security)
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_PATH_B, $security)
+"""
+        setup = subprocess.run(
+            [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", acl_script],
+            env=dict(os.environ, BLOTTER_FIXTURE_PATH_A=str(path_a),
+                     BLOTTER_FIXTURE_PATH_B=str(path_b)),
+            capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(setup.returncode, 0, "synthetic ACL fixture setup failed")
+
+        # The original candidate has a path-only attributes preflight before
+        # File.Open; the successor must open with OPEN_REPARSE_POINT itself.
+        race_hook = r"""
+Move-Item -LiteralPath $env:BLOTTER_MCP_TOKEN_PATH -Destination $env:BLOTTER_MCP_SWAP_BACKUP -ErrorAction Stop
+New-Item -ItemType SymbolicLink -Path $env:BLOTTER_MCP_TOKEN_PATH -Target $env:BLOTTER_MCP_SWAP_TARGET -ErrorAction Stop | Out-Null
+"""
+        old_open = "$stream = [IO.File]::Open($env:BLOTTER_MCP_TOKEN_PATH,"
+        new_open = "$handle = [BlotterNativeFile]::OpenNoReparse($env:BLOTTER_MCP_TOKEN_PATH)"
+        real_run = subprocess.run
+
+        def staged_race(command, **kwargs):
+            source = command[-1]
+            marker = old_open if old_open in source else new_open
+            self.assertIn(marker, source, "expected Windows open boundary absent")
+            modified = source.replace(marker, race_hook + "\n" + marker, 1)
+            env = dict(kwargs["env"], BLOTTER_MCP_SWAP_BACKUP=str(backup),
+                       BLOTTER_MCP_SWAP_TARGET=str(path_b))
+            return real_run([*command[:-1], modified], **dict(kwargs, env=env))
+
+        with mock.patch("agent_blotter.mcp_stdio.subprocess.run", side_effect=staged_race):
+            with self.assertRaises(ValueError):
+                _load_token_file(path_a)
+        self.assertTrue(path_a.is_symlink(), "A-to-B swap never executed")
+        self.assertEqual(path_a.resolve(), path_b.resolve())
+
     def test_pinned_urls_reject_credential_exfiltration_destinations(self):
         self.assertEqual(_validate_config_url(self.bridge.client.url), self.bridge.client.url)
         for url in ("https://attacker.example/blotter", "http://attacker.example",
