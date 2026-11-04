@@ -625,6 +625,25 @@ foreach ($path in @($env:BLOTTER_FIXTURE_A, $env:BLOTTER_FIXTURE_B)) {
         with self.assertRaises(BlotterError):
             load_credentials(alias / "credentials.json")
 
+        # A direct file with an Everyone allow ACE must fail, even though its
+        # owner and JSON contents were accepted before broadening.
+        broaden_script = r"""
+$ErrorActionPreference = 'Stop'
+$security = [IO.File]::GetAccessControl($env:BLOTTER_FIXTURE_B)
+$everyone = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+$read = [System.Security.AccessControl.FileSystemRights]::Read
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($everyone, $read, $allow))
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_B, $security)
+"""
+        broad = subprocess.run(
+            [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", broaden_script],
+            env=dict(os.environ, BLOTTER_FIXTURE_B=str(file_b)),
+            capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(broad.returncode, 0, "synthetic broad ACL setup failed")
+        with self.assertRaises(BlotterError):
+            load_credentials(file_b)
+
     def test_reject_nonstring_event_enums(self):
         for name in ("level", "evidence", "effect"):
             with self.subTest(field=name):
