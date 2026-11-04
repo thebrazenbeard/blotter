@@ -11,6 +11,7 @@ import json
 import math
 import os
 import ssl
+import stat
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -93,6 +94,27 @@ class _BlotterHTTPServer(ThreadingHTTPServer):
             super().finish_request(tls_request, client_address)
         finally:
             tls_request.close()
+
+
+def _check_credentials_file_permissions(path: Path, *, platform: str | None = None) -> None:
+    """Legacy diagnostic preflight; NOT sufficient to authorize credential reads.
+
+    Kept for callers that check paths, but a separate pathname read would race.
+    The server startup uses read_private_credentials_bytes instead.
+    """
+    if path.is_symlink():
+        raise BlotterError("credentials file permissions are unsafe")
+    if platform is None:
+        platform = os.name
+    if platform == "nt":
+        # Reuse the established SID-based check, not localized icacls text.
+        from .mcp_stdio import _check_windows_token_acl
+        try:
+            _check_windows_token_acl(path)
+        except (ValueError, OSError) as exc:
+            raise BlotterError("credentials file permissions could not be verified") from exc
+    elif stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise BlotterError("credentials file must not be accessible by group or others")
 
 
 def load_credentials(path: str | Path) -> dict[str, str]:
