@@ -11,13 +11,13 @@ import json
 import math
 import os
 import ssl
-import stat
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .store import Blotter, BlotterError, SCHEMA_VERSION, _valid_id
+from .private_credentials import read_private_credentials_bytes
 
 MAX_HTTP_BODY = 70000
 MAX_HTTP_PAGE = 100
@@ -95,38 +95,17 @@ class _BlotterHTTPServer(ThreadingHTTPServer):
             tls_request.close()
 
 
-def _check_credentials_file_permissions(path: Path, *, platform: str | None = None) -> None:
-    """Reject credential files whose permissions cannot be proven private.
-
-    MCP actor tokens and this server's actor-to-token JSON must obey the same
-    fail-closed Windows SID rule. A successful POSIX chmod is not a Windows ACL.
-    """
-    if path.is_symlink():
-        raise BlotterError("credentials file permissions are unsafe")
-    if platform is None:
-        platform = os.name
-    if platform == "nt":
-        # Reuse the established SID-based check, not localized icacls text.
-        from .mcp_stdio import _check_windows_token_acl
-        try:
-            _check_windows_token_acl(path)
-        except (ValueError, OSError) as exc:
-            raise BlotterError("credentials file permissions could not be verified") from exc
-    elif stat.S_IMODE(path.stat().st_mode) & 0o077:
-        raise BlotterError("credentials file must not be accessible by group or others")
-
-
 def load_credentials(path: str | Path) -> dict[str, str]:
     """Return token -> actor mapping from an owner-protected JSON file.
 
     Input format: {"agent.one": "<random >=32 char token>", ...}
     """
     path = Path(path)
-    if not path.is_file():
-        raise BlotterError("credentials file not found")
-    _check_credentials_file_permissions(path)
+    # Read the private, owner-bound object through one descriptor/handle. A
+    # pathname ACL preflight followed by read_text admits an A/B substitution.
+    raw = read_private_credentials_bytes(path)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"),
+        data = json.loads(raw.decode("utf-8"),
                           object_pairs_hook=_unique_json_object)
     except (ValueError, UnicodeError) as exc:
         raise BlotterError("invalid credentials JSON") from exc
