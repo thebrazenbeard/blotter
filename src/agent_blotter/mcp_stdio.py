@@ -128,10 +128,71 @@ def _read_windows_token_file_verified(path: Path) -> str:
     """
     script = r"""
 $ErrorActionPreference = 'Stop'
-$attributes = [IO.File]::GetAttributes($env:BLOTTER_MCP_TOKEN_PATH)
-if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 8 }
-$stream = [IO.File]::Open($env:BLOTTER_MCP_TOKEN_PATH,
-    [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+# A pathname attribute check cannot protect a later open against a symlink
+# replacement. OPEN_REPARSE_POINT and GetFileInformationByHandleEx bind the
+# reparse decision to the *same* handle used for ACL and credential bytes.
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class BlotterNativeFile {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FILE_ATTRIBUTE_TAG_INFO {
+        public uint FileAttributes;
+        public uint ReparseTag;
+    }
+
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern SafeFileHandle CreateFileW(
+        string path, uint access, uint share, IntPtr security,
+        uint disposition, uint flags, IntPtr templateHandle);
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool GetFileInformationByHandleEx(
+        SafeFileHandle handle, int informationClass,
+        out FILE_ATTRIBUTE_TAG_INFO info, uint infoSize);
+
+    public static SafeFileHandle OpenNoReparse(string path) {
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT
+        SafeFileHandle handle = CreateFileW(
+            path, 0x80000000U, 1U, IntPtr.Zero, 3U, 0x00200000U, IntPtr.Zero);
+        if (handle.IsInvalid) {
+            int error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new Win32Exception(error);
+        }
+        try {
+            FILE_ATTRIBUTE_TAG_INFO info;
+            if (!GetFileInformationByHandleEx(handle, 9, out info,
+                    (uint)Marshal.SizeOf(typeof(FILE_ATTRIBUTE_TAG_INFO)))) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            if ((info.FileAttributes & 0x400U) != 0) {
+                throw new IOException("Private token reparse point rejected");
+            }
+            return handle;
+        } catch {
+            handle.Dispose();
+            throw;
+        }
+    }
+}
+'@
+try {
+    $handle = [BlotterNativeFile]::OpenNoReparse($env:BLOTTER_MCP_TOKEN_PATH)
+} catch {
+    # Only the explicit opened-handle reparse verdict gets this diagnostic.
+    # Never include the path or credential bytes in stderr.
+    if ($_.Exception.ToString().Contains('Private token reparse point rejected')) {
+        [Console]::Error.WriteLine('Private token reparse point rejected')
+        exit 8
+    }
+    throw
+}
+$stream = [IO.FileStream]::new($handle, [IO.FileAccess]::Read, 4096, $false)
 try {
     $acl = $stream.GetAccessControl()
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
