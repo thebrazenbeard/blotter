@@ -6,6 +6,8 @@ installs itself into ChatGPT nor provides a transport to an unreachable tailnet.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from collections import deque
 import ctypes
 import json
@@ -48,10 +50,14 @@ def _load_token_file(path: Path) -> str:
     if not path.is_file() or path.is_symlink():
         raise ValueError("private Blotter token file unavailable")
     if os.name == "nt":
-        _check_windows_token_acl(path)
-    elif stat.S_IMODE(path.stat().st_mode) & 0o077:
-        raise ValueError("private Blotter token file has unsafe permissions")
-    token = path.read_text(encoding="utf-8").strip()
+        # The same Windows FileStream must supply both its ACL and its bytes.
+        # A separate Get-Acl(path) followed by read_text(path) admits a
+        # rename/reparse replacement between the two path resolutions.
+        token = _read_windows_token_file_verified(path)
+    else:
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            raise ValueError("private Blotter token file has unsafe permissions")
+        token = path.read_text(encoding="utf-8").strip()
     if len(token) < 32:
         raise ValueError("private Blotter token is invalid")
     return token
@@ -110,6 +116,63 @@ if (-not $foundMe) { exit 4 }
         raise ValueError("Windows private token ACL could not be verified") from exc
     if check.returncode != 0 or check.stdout.strip() != "OK":
         raise ValueError("Windows private token owner/ACL is not restricted to actor and SYSTEM")
+
+
+def _read_windows_token_file_verified(path: Path) -> str:
+    """Read a Windows MCP token only from the same handle whose ACL is checked.
+
+    PowerShell 5.1 uses .NET Framework FileStream.GetAccessControl(), which
+    evaluates the opened object, not a second lookup of a mutable filename.
+    FileShare.Read excludes concurrent write/delete handles while it is open.
+    The service-side credentials reader is a *separate* deployment gate.
+    """
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$attributes = [IO.File]::GetAttributes($env:BLOTTER_MCP_TOKEN_PATH)
+if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 8 }
+$stream = [IO.File]::Open($env:BLOTTER_MCP_TOKEN_PATH,
+    [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+try {
+    $acl = $stream.GetAccessControl()
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $permitted = @($me, 'S-1-5-18')
+    $ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($ownerSid -notin $permitted) { exit 5 }
+    $foundMe = $false
+    foreach ($rule in $acl.Access) {
+        if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+        $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+        if ($sid -notin $permitted) { exit 3 }
+        if ($sid -eq $me) { $foundMe = $true }
+    }
+    if (-not $foundMe) { exit 4 }
+    if ($stream.Length -lt 32 -or $stream.Length -gt 8192) { exit 6 }
+    $bytes = New-Object byte[] ([int]$stream.Length)
+    $offset = 0
+    while ($offset -lt $bytes.Length) {
+        $received = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+        if ($received -le 0) { exit 7 }
+        $offset += $received
+    }
+    [Console]::Out.Write([Convert]::ToBase64String($bytes))
+} finally {
+    $stream.Dispose()
+}
+"""
+    env = dict(os.environ, BLOTTER_MCP_TOKEN_PATH=str(path))
+    try:
+        result = subprocess.run(
+            [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", script],
+            env=env, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("Windows private Blotter token handle could not be verified") from exc
+    if result.returncode != 0:
+        raise ValueError("Windows private Blotter token owner/ACL or read could not be verified")
+    try:
+        raw = base64.b64decode(result.stdout, validate=True)
+        return raw.decode("utf-8").strip()
+    except (ValueError, UnicodeError, binascii.Error) as exc:
+        raise ValueError("Windows private Blotter token read returned invalid bytes") from exc
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:

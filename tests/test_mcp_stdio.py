@@ -1,8 +1,10 @@
 """Wire- and authority-boundary tests for the dependency-free MCP adapter."""
 import ctypes
+import base64
 import io
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -12,6 +14,7 @@ from unittest import mock
 from agent_blotter import Blotter, BlotterError
 from agent_blotter.mcp_stdio import (BlotterMCP, MAX_INPUT_BYTES,
                                      _check_windows_token_acl, _load_token_file,
+                                     _trusted_windows_powershell,
                                      _validate_config_url, main as mcp_main)
 from agent_blotter.remote import RemoteBlotter
 from agent_blotter.server import create_server
@@ -286,6 +289,99 @@ class StdioAdapterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _check_windows_token_acl(Path("C:/private/agent.token"))
             self.assertEqual(run.call_count, 0)
+
+    def test_windows_token_read_must_bind_acl_and_bytes_to_same_handle(self):
+        """A path read after a separate ACL check can consume swapped bytes."""
+        trusted = "T" * 40
+        swapped = "X" * 40
+        class Process:
+            returncode = 0
+            stdout = base64.b64encode(trusted.encode("utf-8")).decode("ascii")
+        path = Path(self.temp.name, "synthetic-actor.token")
+        path.write_text(trusted, encoding="utf-8")
+        with mock.patch("agent_blotter.mcp_stdio.os", wraps=os) as platform, \
+             mock.patch("agent_blotter.mcp_stdio._trusted_windows_powershell",
+                        return_value=r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"), \
+             mock.patch("agent_blotter.mcp_stdio._check_windows_token_acl"), \
+             mock.patch("agent_blotter.mcp_stdio.subprocess.run", return_value=Process()) as run, \
+             mock.patch.object(Path, "read_text", return_value=swapped) as unsafe_read:
+            platform.name = "nt"
+            self.assertEqual(_load_token_file(path), trusted)
+        unsafe_read.assert_not_called()
+        script = run.call_args.args[0][-1]
+        self.assertIn("$stream.GetAccessControl()", script)
+        self.assertIn("$stream.Read(", script)
+        self.assertIn("[IO.FileShare]::Read", script)
+        self.assertIn("[IO.FileAttributes]::ReparsePoint", script)
+        self.assertNotIn("Get-Acl -LiteralPath", script)
+
+    def test_windows_handle_bound_read_fails_closed_on_bad_process_result(self):
+        path = Path(self.temp.name, "synthetic-actor.token")
+        path.write_text("T" * 40, encoding="utf-8")
+        for status, output in ((5, ""), (0, ""), (0, "not-base64!?"),
+                               (0, base64.b64encode(b"short").decode("ascii"))):
+            with self.subTest(status=status, output=output), \
+                 mock.patch("agent_blotter.mcp_stdio.os", wraps=os) as platform, \
+                 mock.patch("agent_blotter.mcp_stdio._trusted_windows_powershell",
+                            return_value=r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"), \
+                 mock.patch("agent_blotter.mcp_stdio.subprocess.run") as run:
+                platform.name = "nt"
+                run.return_value.returncode = status
+                run.return_value.stdout = output
+                with self.assertRaises(ValueError):
+                    _load_token_file(path)
+
+    def test_symlink_token_is_rejected_before_credential_helper(self):
+        target = Path(self.temp.name, "synthetic-target")
+        target.write_text("T" * 40, encoding="utf-8")
+        link = Path(self.temp.name, "synthetic-actor.token")
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation unavailable on this host")
+        with mock.patch("agent_blotter.mcp_stdio.subprocess.run") as run:
+            with self.assertRaises(ValueError):
+                _load_token_file(link)
+        run.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows ACLs and .NET Framework FileStream")
+    def test_real_windows_handle_bound_fixture_accepts_private_and_denies_broad_acl(self):
+        """Exercise actual Windows FileStream ACL/content on synthetic tokens only."""
+        acl_script = r"""
+$ErrorActionPreference = 'Stop'
+$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$security = [System.Security.AccessControl.FileSecurity]::new()
+$security.SetOwner($owner)
+$security.SetAccessRuleProtection($true, $false)
+$full = [System.Security.AccessControl.FileSystemRights]::FullControl
+$read = [System.Security.AccessControl.FileSystemRights]::Read
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($owner, $full, $allow))
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, $full, $allow))
+if ($env:BLOTTER_FIXTURE_BROAD -eq 'yes') {
+    $everyone = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+    $security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($everyone, $read, $allow))
+}
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_PATH, $security)
+"""
+        trusted = "T" * 40
+        for broad in (False, True):
+            with self.subTest(broad=broad):
+                path = Path(self.temp.name, "synthetic-broad.token" if broad else "synthetic-private.token")
+                path.write_text(trusted, encoding="utf-8")
+                setup = subprocess.run(
+                    [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", acl_script],
+                    env=dict(os.environ, BLOTTER_FIXTURE_PATH=str(path),
+                             BLOTTER_FIXTURE_BROAD="yes" if broad else "no"),
+                    capture_output=True, text=True, timeout=10, check=False)
+                self.assertEqual(setup.returncode, 0,
+                                 "synthetic fixture ACL setup failed (no credential displayed)")
+                if broad:
+                    with self.assertRaises(ValueError):
+                        _load_token_file(path)
+                else:
+                    self.assertEqual(_load_token_file(path), trusted)
 
     def test_pinned_urls_reject_credential_exfiltration_destinations(self):
         self.assertEqual(_validate_config_url(self.bridge.client.url), self.bridge.client.url)

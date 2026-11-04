@@ -57,10 +57,17 @@ default probe is read-only. An append/read-back probe requires the explicit
 ## Security and evidence limits
 
 - On Unix, the token file must not be group/world-readable. On Windows, a
-  read-only PowerShell `Get-Acl` preflight rejects Allow ACEs beyond the
-  launching user and SYSTEM, and fails closed if the check cannot run. This
-  adapter does not install or change ACLs. The ACL parser still requires an
-  actual Lappy-host runtime qualification before deployment.
+  Windows PowerShell 5.1 helper opens one `FileStream` with read-only access
+  and no write/delete sharing, evaluates its owner and allow ACEs through
+  `FileStream.GetAccessControl()`, and reads the token bytes from **that same
+  stream**. This prevents a path replacement between a separate ACL preflight
+  and the credential read. It rejects a reparse-point file at the initial path
+  check; no claim is made that every ancestor junction can be excluded. The
+  helper returns bounded encoded bytes only to
+  its launching process; never log its standard output. The adapter does not
+  install or change ACLs. Host runtime and parent-directory access-control
+  qualification are separate gates; the server credentials loader has its own
+  distinct check/open risk.
 - Tool inputs contain no URL, credential, identity, cursor-path, or legacy
   re-enrollment override. Inputs are size-limited; output errors do not echo
   tokens or arbitrary server response bodies. Existing HTTPS verification and
