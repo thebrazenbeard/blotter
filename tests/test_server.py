@@ -6,6 +6,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -528,6 +529,26 @@ class ServerTests(unittest.TestCase):
             with self.assertRaisesRegex(BlotterError, "invalid credentials JSON"):
                 load_credentials(path)
 
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "mkfifo"),
+                         "requires Unix named FIFO support")
+    def test_posix_credentials_fifo_replacement_never_blocks(self):
+        """An attacker-controlled FIFO must fail promptly before a blocking read."""
+        fifo = Path(self.tmp.name) / "synthetic-credentials.fifo"
+        os.mkfifo(fifo, 0o600)
+        probe = """
+import sys
+from agent_blotter.server import load_credentials
+from agent_blotter.store import BlotterError
+try:
+    load_credentials(sys.argv[1])
+except BlotterError:
+    sys.exit(0)
+sys.exit(3)
+"""
+        result = subprocess.run([sys.executable, "-c", probe, str(fifo)],
+                                capture_output=True, text=True, timeout=5, check=False)
+        self.assertEqual(result.returncode, 0, "FIFO was not rejected as a private file")
+
     @unittest.skipUnless(os.name == "posix", "requires Unix descriptor semantics")
     def test_posix_credentials_acl_content_must_use_one_descriptor(self):
         """Old path ACL check followed by read_text accepted synthetic B."""
@@ -576,16 +597,18 @@ class ServerTests(unittest.TestCase):
         setup_script = r"""
 $ErrorActionPreference = 'Stop'
 $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$security = [System.Security.AccessControl.FileSecurity]::new()
-$security.SetOwner($owner)
-$security.SetAccessRuleProtection($true, $false)
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $full = [System.Security.AccessControl.FileSystemRights]::FullControl
 $allow = [System.Security.AccessControl.AccessControlType]::Allow
-$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($owner, $full, $allow))
-$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, $full, $allow))
-[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_A, $security)
-[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_B, $security)
+foreach ($path in @($env:BLOTTER_FIXTURE_A, $env:BLOTTER_FIXTURE_B)) {
+    # Independent descriptors: SetAccessControl may mutate its input object.
+    $security = [System.Security.AccessControl.FileSecurity]::new()
+    $security.SetOwner($owner)
+    $security.SetAccessRuleProtection($true, $false)
+    $security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($owner, $full, $allow))
+    $security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, $full, $allow))
+    [IO.File]::SetAccessControl($path, $security)
+}
 """
         setup = subprocess.run(
             [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", setup_script],
