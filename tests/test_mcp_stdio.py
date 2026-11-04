@@ -311,8 +311,10 @@ class StdioAdapterTests(unittest.TestCase):
         script = run.call_args.args[0][-1]
         self.assertIn("$stream.GetAccessControl()", script)
         self.assertIn("$stream.Read(", script)
-        self.assertIn("[IO.FileShare]::Read", script)
-        self.assertIn("[IO.FileAttributes]::ReparsePoint", script)
+        self.assertIn("FILE_SHARE_READ", script)
+        self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT", script)
+        self.assertIn("GetFileInformationByHandleEx", script)
+        self.assertNotIn("[IO.File]::GetAttributes(", script)
         self.assertNotIn("Get-Acl -LiteralPath", script)
 
     def test_windows_handle_bound_read_fails_closed_on_bad_process_result(self):
@@ -435,6 +437,7 @@ New-Item -ItemType SymbolicLink -Path $env:BLOTTER_MCP_TOKEN_PATH -Target $env:B
         old_open = "$stream = [IO.File]::Open($env:BLOTTER_MCP_TOKEN_PATH,"
         new_open = "$handle = [BlotterNativeFile]::OpenNoReparse($env:BLOTTER_MCP_TOKEN_PATH)"
         real_run = subprocess.run
+        staged_results = []
 
         def staged_race(command, **kwargs):
             source = command[-1]
@@ -443,13 +446,21 @@ New-Item -ItemType SymbolicLink -Path $env:BLOTTER_MCP_TOKEN_PATH -Target $env:B
             modified = source.replace(marker, race_hook + "\n" + marker, 1)
             env = dict(kwargs["env"], BLOTTER_MCP_SWAP_BACKUP=str(backup),
                        BLOTTER_MCP_SWAP_TARGET=str(path_b))
-            return real_run([*command[:-1], modified], **dict(kwargs, env=env))
+            result = real_run([*command[:-1], modified], **dict(kwargs, env=env))
+            staged_results.append(result)
+            return result
 
         with mock.patch("agent_blotter.mcp_stdio.subprocess.run", side_effect=staged_race):
             with self.assertRaises(ValueError):
                 _load_token_file(path_a)
         self.assertTrue(path_a.is_symlink(), "A-to-B swap never executed")
         self.assertEqual(path_a.resolve(), path_b.resolve())
+        self.assertEqual(len(staged_results), 1)
+        # Any generic failure can accidentally make assertRaises pass. The
+        # precise release oracle is an explicit reparse rejection on the
+        # *opened handle*, even when B has an otherwise accepted private ACL.
+        self.assertNotEqual(staged_results[0].returncode, 0)
+        self.assertIn("Private token reparse point rejected", staged_results[0].stderr)
 
     def test_pinned_urls_reject_credential_exfiltration_destinations(self):
         self.assertEqual(_validate_config_url(self.bridge.client.url), self.bridge.client.url)
