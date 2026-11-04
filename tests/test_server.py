@@ -513,8 +513,10 @@ class ServerTests(unittest.TestCase):
             path.chmod(0o600)
         # A temporary directory does not guarantee a private Windows DACL.
         # Schema validation is separate from the fail-closed ACL tests.
-        permissions = (mock.patch("agent_blotter.mcp_stdio._check_windows_token_acl")
-                       if os.name == "nt" else contextlib.nullcontext())
+        permissions = (mock.patch(
+            "agent_blotter.server.read_private_credentials_bytes",
+            side_effect=lambda p: Path(p).read_bytes())
+            if os.name == "nt" else contextlib.nullcontext())
         with permissions:
             self.assertEqual(load_credentials(path), {self.token_a: "agent.one"})
             path.write_text(json.dumps({"agent.one": "short"}), encoding="utf-8")
@@ -525,6 +527,80 @@ class ServerTests(unittest.TestCase):
                 encoding="utf-8")
             with self.assertRaisesRegex(BlotterError, "invalid credentials JSON"):
                 load_credentials(path)
+
+    @unittest.skipUnless(os.name == "posix", "requires Unix descriptor semantics")
+    def test_posix_credentials_acl_content_must_use_one_descriptor(self):
+        """Old path ACL check followed by read_text accepted synthetic B."""
+        path = Path(self.tmp.name) / "synthetic-credentials.json"
+        original = json.dumps({"agent.one": "A" * 40})
+        forged = json.dumps({"agent.one": "B" * 40})
+        path.write_text(original, encoding="utf-8")
+        path.chmod(0o600)
+        with mock.patch.object(Path, "read_text", return_value=forged) as unsafe_read:
+            self.assertEqual(load_credentials(path), {"A" * 40: "agent.one"})
+        unsafe_read.assert_not_called()
+
+    @unittest.skipUnless(os.name == "posix", "requires Unix no-follow directory descriptors")
+    def test_posix_credentials_reject_parent_symlink(self):
+        root = Path(self.tmp.name) / "synthetic-parent-symlink"
+        trusted = root / "trusted"
+        attacker = root / "attacker"
+        trusted.mkdir(parents=True)
+        attacker.mkdir()
+        for directory, letter in ((trusted, "A"), (attacker, "B")):
+            file = directory / "credentials.json"
+            file.write_text(json.dumps({"agent.one": letter * 40}), encoding="utf-8")
+            file.chmod(0o600)
+        self.assertEqual(load_credentials(trusted / "credentials.json"),
+                         {"A" * 40: "agent.one"})
+        alias = root / "alias"
+        alias.symlink_to(attacker, target_is_directory=True)
+        self.assertTrue((alias / "credentials.json").is_file())
+        self.assertFalse((alias / "credentials.json").is_symlink())
+        with self.assertRaises(BlotterError):
+            load_credentials(alias / "credentials.json")
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows ACL and reparse semantics")
+    def test_windows_server_credential_handle_fixture_and_parent_guard(self):
+        """Actual Windows security API, synthetic actor JSONs; no real tokens."""
+        from agent_blotter.mcp_stdio import _trusted_windows_powershell
+        root = Path(self.tmp.name) / "synthetic-server-credentials"
+        a = root / "parent-a"
+        b = root / "parent-b"
+        a.mkdir(parents=True)
+        b.mkdir()
+        file_a = a / "credentials.json"
+        file_b = b / "credentials.json"
+        file_a.write_text(json.dumps({"agent.one": "A" * 40}), encoding="utf-8")
+        file_b.write_text(json.dumps({"agent.one": "B" * 40}), encoding="utf-8")
+        setup_script = r"""
+$ErrorActionPreference = 'Stop'
+$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$security = [System.Security.AccessControl.FileSecurity]::new()
+$security.SetOwner($owner)
+$security.SetAccessRuleProtection($true, $false)
+$full = [System.Security.AccessControl.FileSystemRights]::FullControl
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($owner, $full, $allow))
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, $full, $allow))
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_A, $security)
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_B, $security)
+"""
+        setup = subprocess.run(
+            [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", setup_script],
+            env=dict(os.environ, BLOTTER_FIXTURE_A=str(file_a), BLOTTER_FIXTURE_B=str(file_b)),
+            capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(setup.returncode, 0, "synthetic ACL setup failed")
+        self.assertEqual(load_credentials(file_a), {"A" * 40: "agent.one"})
+        self.assertEqual(load_credentials(file_b), {"B" * 40: "agent.one"})
+        alias = root / "alias"
+        try:
+            alias.symlink_to(b, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("Windows runner cannot make synthetic directory symlinks")
+        with self.assertRaises(BlotterError):
+            load_credentials(alias / "credentials.json")
 
     def test_reject_nonstring_event_enums(self):
         for name in ("level", "evidence", "effect"):
