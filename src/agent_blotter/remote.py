@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import http.client
+import math
 import socket
 import urllib.error
 import urllib.parse
@@ -48,6 +49,35 @@ def _read_bounded(reply: Any, maximum: int) -> bytes:
     if len(content) > maximum:
         raise ValueError("response exceeds safe size")
     return content
+
+
+def _unique_response_object(pairs: list[tuple[str, Any]]) -> dict:
+    """Reject ambiguous remote JSON before treating a receipt as observed."""
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON response key")
+        value[key] = item
+    return value
+
+
+def _finite_response_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("nonfinite JSON response number")
+    return number
+
+
+def _reject_nonfinite_response_constant(_value: str) -> float:
+    raise ValueError("nonfinite JSON response number")
+
+
+def _decode_response(raw: bytes) -> Any:
+    return json.loads(
+        raw.decode("utf-8"), object_pairs_hook=_unique_response_object,
+        parse_float=_finite_response_float,
+        parse_constant=_reject_nonfinite_response_constant,
+    )
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -105,7 +135,7 @@ class RemoteBlotter:
             with self._opener.open(req, timeout=self.timeout) as reply:
                 try:
                     content = _read_bounded(reply, _response_budget(route, data))
-                    result = json.loads(content.decode("utf-8"))
+                    result = _decode_response(content)
                     if not isinstance(result, dict):
                         raise ValueError("response is not a JSON object")
                     return result
@@ -123,8 +153,7 @@ class RemoteBlotter:
         except urllib.error.HTTPError as exc:
             try:
                 try:
-                    details = json.loads(_read_bounded(
-                        exc, _ERROR_RESPONSE_BYTES).decode("utf-8"))
+                    details = _decode_response(_read_bounded(exc, _ERROR_RESPONSE_BYTES))
                     reason = details.get("error", "request rejected") if isinstance(
                         details, dict) else "request rejected"
                     if not isinstance(reason, str):

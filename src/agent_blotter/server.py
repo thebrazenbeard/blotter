@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .store import Blotter, BlotterError, SCHEMA_VERSION, _valid_id
+from .private_credentials import read_private_credentials_bytes
 
 MAX_HTTP_BODY = 70000
 MAX_HTTP_PAGE = 100
@@ -96,10 +97,10 @@ class _BlotterHTTPServer(ThreadingHTTPServer):
 
 
 def _check_credentials_file_permissions(path: Path, *, platform: str | None = None) -> None:
-    """Reject credential files whose permissions cannot be proven private.
+    """Legacy diagnostic preflight; NOT sufficient to authorize credential reads.
 
-    MCP actor tokens and this server's actor-to-token JSON must obey the same
-    fail-closed Windows SID rule. A successful POSIX chmod is not a Windows ACL.
+    Kept for callers that check paths, but a separate pathname read would race.
+    The server startup uses read_private_credentials_bytes instead.
     """
     if path.is_symlink():
         raise BlotterError("credentials file permissions are unsafe")
@@ -122,11 +123,11 @@ def load_credentials(path: str | Path) -> dict[str, str]:
     Input format: {"agent.one": "<random >=32 char token>", ...}
     """
     path = Path(path)
-    if not path.is_file():
-        raise BlotterError("credentials file not found")
-    _check_credentials_file_permissions(path)
+    # Read the private, owner-bound object through one descriptor/handle. A
+    # pathname ACL preflight followed by read_text admits an A/B substitution.
+    raw = read_private_credentials_bytes(path)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"),
+        data = json.loads(raw.decode("utf-8"),
                           object_pairs_hook=_unique_json_object)
     except (ValueError, UnicodeError) as exc:
         raise BlotterError("invalid credentials JSON") from exc
