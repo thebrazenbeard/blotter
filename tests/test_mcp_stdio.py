@@ -399,12 +399,12 @@ if ($env:BLOTTER_FIXTURE_BROAD -eq 'yes') {
         path_a.write_text("A" * 40, encoding="utf-8")
         path_b.write_text("B" * 40, encoding="utf-8")
         try:
+            # Retain the replacement link: Python can use Developer Mode's
+            # unprivileged creation, while PowerShell New-Item may still deny
+            # it. The interlock moves this real link at the file-open boundary.
             probe.symlink_to(path_b)
         except (OSError, NotImplementedError):
             self.skipTest("this Windows runner cannot create synthetic file symlinks")
-        finally:
-            if probe.is_symlink():
-                probe.unlink()
 
         acl_script = r"""
 $ErrorActionPreference = 'Stop'
@@ -431,7 +431,7 @@ $security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::ne
         # File.Open; the successor must open with OPEN_REPARSE_POINT itself.
         race_hook = r"""
 Move-Item -LiteralPath $env:BLOTTER_MCP_TOKEN_PATH -Destination $env:BLOTTER_MCP_SWAP_BACKUP -ErrorAction Stop
-New-Item -ItemType SymbolicLink -Path $env:BLOTTER_MCP_TOKEN_PATH -Target $env:BLOTTER_MCP_SWAP_TARGET -ErrorAction Stop | Out-Null
+Move-Item -LiteralPath $env:BLOTTER_MCP_SWAP_LINK -Destination $env:BLOTTER_MCP_TOKEN_PATH -ErrorAction Stop
 """
         old_open = "$stream = [IO.File]::Open($env:BLOTTER_MCP_TOKEN_PATH,"
         new_open = "$handle = [BlotterNativeFile]::OpenNoReparse($env:BLOTTER_MCP_TOKEN_PATH)"
@@ -444,7 +444,7 @@ New-Item -ItemType SymbolicLink -Path $env:BLOTTER_MCP_TOKEN_PATH -Target $env:B
             self.assertIn(marker, source, "expected Windows open boundary absent")
             modified = source.replace(marker, race_hook + "\n" + marker, 1)
             env = dict(kwargs["env"], BLOTTER_MCP_SWAP_BACKUP=str(backup),
-                       BLOTTER_MCP_SWAP_TARGET=str(path_b))
+                       BLOTTER_MCP_SWAP_LINK=str(probe))
             result = real_run([*command[:-1], modified], **dict(kwargs, env=env))
             staged_results.append(result)
             return result

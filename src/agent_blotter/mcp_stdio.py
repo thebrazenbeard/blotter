@@ -252,7 +252,8 @@ try {
     try:
         result = subprocess.run(
             [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", script],
-            env=env, capture_output=True, text=True, timeout=10, check=False)
+            env=env, capture_output=True, text=True, timeout=10, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError("Windows private Blotter token handle could not be verified") from exc
     if result.returncode != 0:
