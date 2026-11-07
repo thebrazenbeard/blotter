@@ -33,6 +33,10 @@ lane, not abrupt-crash, power-loss, boot recovery or universal capture.
   The exact opened-handle rejection oracle remains required and passed.
 - Initial restricted local-socket runs failed at the execution boundary. The
   reported integration results used authorized loopback-capable execution.
+- Linux/Python 3.10 CI exposed an old simulated-Windows turn test attempting
+  native Windows path construction. That test now supplies an explicit
+  verified-reader denial and retains its required `PermissionError` assertion;
+  actual Windows private-file acceptance/rejection remains independently tested.
 
 Five distinct native specialists investigated authentication, runtime,
 integration mapping, durability and hostile review. The hostile reviewer found
