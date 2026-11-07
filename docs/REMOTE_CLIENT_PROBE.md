@@ -16,10 +16,12 @@ The diagnostic connects directly; it never sends a bearer through ambient
 `HTTP_PROXY` or `HTTPS_PROXY` and does not follow HTTP redirects.
 
 For Linux (POSIX), provision an owner-only regular token file, not a symlink,
-with mode 0600 or stricter. A Windows token file is rejected until reliable
-DACL verification is implemented; on VN1 inject `BLOTTER_TOKEN` from a trusted
-credential source into the probe's process environment (not command arguments).
-Protect the process environment from lower-trust users.
+with mode 0600 or stricter. On Windows, `--token-file` reuses the existing MCP
+reader: the same opened handle supplies its restrictive DACL and bytes, with
+leaf and parent reparse checks. Owner/SYSTEM custody must pass; verification
+failure never falls back to an environment token. A trusted credential manager
+may still inject a process-scoped `BLOTTER_TOKEN` when no file is selected.
+Never pass the bearer in arguments or persist it in user/machine environment.
 
 For example, with `BLOTTER_URL` already set:
 
