@@ -150,6 +150,80 @@ class MCPHTTPStdioIntegrationTests(unittest.TestCase):
         self.assertTrue(replies[3]["result"]["isError"])
         self.assertEqual(self.ledger.verify()["count"], 1)
 
+    def test_real_http_paged_catchup_replays_lost_reply_and_keeps_readers_independent(self):
+        original_ids = [f"paged-peer-{i}" for i in range(17)]
+        for eid in original_ids:
+            self.ledger.record(actor="agent.beta", kind="test.executed",
+                               message="peer action", event_id=eid)
+
+        def invoke(adapter, name, arguments):
+            reply = run_wire(adapter, [call(8, name, arguments)])[0]
+            self.assertNotIn("error", reply, reply)
+            self.assertFalse(reply["result"]["isError"], reply)
+            return json.loads(reply["result"]["content"][0]["text"])
+
+        run_wire(self.adapter, ready_prefix())
+        first = invoke(self.adapter, "read_turn_page", {
+            "reader": "chat-one", "session": "before-interruption", "limit": 4})
+        self.adapter = BlotterMCP(self.client, Path(self.temp.name) / "cursors")
+        run_wire(self.adapter, ready_prefix())
+        replay = invoke(self.adapter, "read_turn_page", {
+            "reader": "chat-one", "session": "after-interruption", "limit": 4})
+        self.assertEqual(replay, first)
+
+        for reader in ("chat-one", "chat-two", "chat-one-child"):
+            seen = []
+            for _ in range(30):
+                page = invoke(self.adapter, "read_turn_page", {
+                    "reader": reader, "session": "resumed", "limit": 4})
+                seen.extend(event["id"] for event in page["events"])
+                invoke(self.adapter, "acknowledge_turn_page", {
+                    "reader": reader, "receipt": page["receipt"]})
+                if not page["has_more"]:
+                    break
+            else:
+                self.fail("HTTP catch-up failed to make progress")
+            self.assertEqual([eid for eid in seen if eid in original_ids], original_ids)
+        self.assertTrue(self.ledger.verify()["ok"])
+
+    def test_acknowledgment_for_another_reader_cannot_consume_pending_history(self):
+        self.ledger.record(actor="agent.beta", kind="test.executed",
+                           message="keep pending", event_id="pending-for-one")
+        run_wire(self.adapter, ready_prefix())
+        page_reply = run_wire(self.adapter, [call(2, "read_turn_page", {
+            "reader": "one", "session": "turn"})])[0]
+        self.assertNotIn("error", page_reply, page_reply)
+        page = json.loads(page_reply["result"]["content"][0]["text"])
+        rejected = run_wire(self.adapter, [call(3, "acknowledge_turn_page", {
+            "reader": "two", "receipt": page["receipt"]})])[0]
+        self.assertTrue(rejected["result"]["isError"])
+        replay = run_wire(self.adapter, [call(4, "read_turn_page", {
+            "reader": "one", "session": "next-turn"})])[0]
+        self.assertEqual(page, json.loads(replay["result"]["content"][0]["text"]))
+
+    def test_replayed_old_final_page_requires_a_fresh_current_session_check(self):
+        run_wire(self.adapter, ready_prefix())
+
+        def invoke(name, **arguments):
+            reply = run_wire(self.adapter, [call(5, name, arguments)])[0]
+            self.assertNotIn("error", reply, reply)
+            self.assertFalse(reply["result"]["isError"], reply)
+            return json.loads(reply["result"]["content"][0]["text"])
+
+        old_page = invoke("read_turn_page", reader="chat", session="old-turn")
+        self.assertFalse(old_page["has_more"])
+        event = self.ledger.record(actor="agent.beta", kind="test.executed",
+                                   message="arrived after the old snapshot",
+                                   event_id="new-turn-peer-action")
+        replay = invoke("read_turn_page", reader="chat", session="current-turn")
+        self.assertEqual(replay, old_page)
+        self.assertNotEqual(replay["session"], "current-turn")
+        invoke("acknowledge_turn_page", reader="chat", receipt=replay["receipt"])
+        fresh = invoke("read_turn_page", reader="chat", session="current-turn")
+        self.assertEqual(fresh["session"], "current-turn")
+        self.assertIn(event["id"], [entry["id"] for entry in fresh["events"]])
+        invoke("acknowledge_turn_page", reader="chat", receipt=fresh["receipt"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "blotter-codex-local",
+  "version": "0.2.0",
+  "description": "Acknowledged Blotter catch-up guidance and private host tool observations",
+  "extensions": {
+    "com.openai": {
+      "hooks": "./hooks/hooks.json"
+    }
+  }
+}

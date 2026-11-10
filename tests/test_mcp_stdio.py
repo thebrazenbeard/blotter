@@ -72,13 +72,14 @@ class StdioAdapterTests(unittest.TestCase):
         self.assertEqual(result["result"]["capabilities"], {"tools": {"listChanged": False}})
         self.bridge.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-    def test_requires_handshake_and_exposes_only_three_tools(self):
+    def test_requires_handshake_and_exposes_only_ledger_tools(self):
         before = self.bridge.handle(rpc(1, "tools/list"))
         self.assertEqual(before["error"]["code"], -32002)
         self.initialize()
         tools = self.bridge.handle(rpc(2, "tools/list"))["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools],
-                         ["begin_turn", "latest20", "record_activity"])
+                         ["begin_turn", "latest20", "record_activity",
+                          "read_turn_page", "acknowledge_turn_page"])
         for tool in tools:
             self.assertFalse(any("token" in str(prop).lower()
                                  for prop in tool["inputSchema"]["properties"]))

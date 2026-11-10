@@ -39,7 +39,10 @@ PINNED_FILES = (
     "src/agent_blotter/__init__.py", "src/agent_blotter/store.py",
     "src/agent_blotter/server.py", "src/agent_blotter/remote.py",
     "src/agent_blotter/probe.py", "src/agent_blotter/private_credentials.py",
-    "src/agent_blotter/mcp_stdio.py", "ops/verify_operational_client.py",
+    "src/agent_blotter/mcp_stdio.py", "src/agent_blotter/turn.py",
+    "src/agent_blotter/turn_pages.py", "src/agent_blotter/codex_hooks.py",
+    "src/agent_blotter/cli.py", "src/agent_blotter/doctor.py",
+    "pyproject.toml", "ops/verify_operational_client.py",
 )
 
 
