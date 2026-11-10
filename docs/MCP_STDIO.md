@@ -33,10 +33,11 @@ Prefer `read_turn_page` and `acknowledge_turn_page` for new host integrations:
 
 All readers share the same ledger. Reader scopes track who received history;
 they are not separate lanes, authentication identities, or permissions. The
-configured credential still binds every call to one fixed actor. A host must
-give concurrent chats and children different stable readers so one cannot
-consume another's unseen history. Reader strings are validated and hashed
-before constructing any state path. Reuse a reader across turns and resumes.
+configured credential still binds every call to one fixed actor. A host should
+give concurrent chats and children different stable readers to prevent
+accidental cursor sharing; the adapter does not enforce this separation.
+Reader strings are validated and hashed before constructing any state path.
+Reuse a reader across turns and resumes.
 
 Pending pages survive adapter restarts and are returned unchanged, including
 their original session, until acknowledged. A lost acknowledgment can be
@@ -45,6 +46,34 @@ clear a newer pending page. Wrong receipts, changed ledger URLs, corrupt state,
 and checkpoint mismatches fail closed. Nothing silently resets a legacy cursor.
 An acknowledgment records receipt of its saved snapshot; ledger replacement is
 detected by the hash checkpoint on the next server check.
+
+### Shared-connector reader provenance limitation
+
+`reader` is a caller-supplied cursor namespace, not an authenticated chat or
+child identity. A separate MCP client using the same configured actor token can
+request any syntactically valid `reader`, replay that reader's pending page and
+acknowledge its receipt. That advances the named reader's cursor even if the
+intended chat has not seen the events. The regression test characterizes this
+behavior; it does **not** repair the isolation boundary. Likewise, a
+`turn.checked` event proves the configured actor's service request, **not**
+which ChatGPT chat or subagent read its response.
+
+Until a host binds unforgeable reader identities to individual clients, treat
+page acknowledgments as **shared-client delivery claims**, not independently
+attested per-chat observation. Host-assigned opaque names may reduce accidental
+collision but do not themselves authorize a reader at this adapter boundary.
+Do not use a read receipt to grant a lease, certify that a named agent saw an
+instruction, or otherwise elevate ledger entries into authority.
+
+### Catch-up marker cost
+
+Each new `read_turn_page` invokes authenticated `/v1/check`, which appends one
+permanent `turn.checked` marker. Initial catch-up across many fresh readers can
+produce many check markers and crowd them into unfiltered `latest20`. This is
+the protocol's intended side effect, not evidence of separate substantive work
+or a separate actor. A future versioned snapshot/finalize design could reduce
+marker frequency, but must preserve append-only history, cursor hashes and
+replay semantics. Never silently filter the canonical event stream.
 
 This bounds each response while allowing a backlog larger than the old
 all-at-once byte/page budget to make durable progress. If a single event cannot
