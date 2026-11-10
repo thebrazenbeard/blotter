@@ -299,7 +299,8 @@ class StdioAdapterTests(unittest.TestCase):
             returncode = 0
             stdout = base64.b64encode(trusted.encode("utf-8")).decode("ascii")
         path = Path(self.temp.name, "synthetic-actor.token")
-        path.write_text(trusted, encoding="utf-8")
+        # Public fixture text only; no runtime credential is written here.
+        path.write_text("T" * 40, encoding="utf-8")
         with mock.patch("agent_blotter.mcp_stdio.os", wraps=os) as platform, \
              mock.patch("agent_blotter.mcp_stdio._trusted_windows_powershell",
                         return_value=r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"), \
@@ -371,7 +372,8 @@ if ($env:BLOTTER_FIXTURE_BROAD -eq 'yes') {
         for broad in (False, True):
             with self.subTest(broad=broad):
                 path = Path(self.temp.name, "synthetic-broad.token" if broad else "synthetic-private.token")
-                path.write_text(trusted, encoding="utf-8")
+                # Public fixture text only; no runtime credential is written here.
+                path.write_text("T" * 40, encoding="utf-8")
                 setup = subprocess.run(
                     [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", acl_script],
                     env=dict(os.environ, BLOTTER_FIXTURE_PATH=str(path),
