@@ -170,9 +170,34 @@ class Blotter:
     def _append_locked(self, db: sqlite3.Connection, base: dict[str, Any],
                        occurred_at: str | None) -> dict[str, Any]:
         explicit_time = _utc(occurred_at) if occurred_at is not None else None
-        existing = db.execute("SELECT body FROM events WHERE id=?", (base["id"],)).fetchone()
+        existing = db.execute(
+            "SELECT seq,id,actor,kind,session,recorded_at,body,prev_hash,hash "
+            "FROM events WHERE id=?", (base["id"],)
+        ).fetchone()
         if existing:
-            old = json.loads(existing[0])
+            # A retry must not acknowledge a corrupted stored row. This is a
+            # bounded row/adjacent-link check, not full-history verification or
+            # protection against coherent database replacement and rollback.
+            seq, eid, actor, kind, session, recorded_at, body, prior, digest = existing
+            previous = (db.execute("SELECT hash FROM events WHERE seq=?", (seq - 1,)).fetchone()
+                        if seq > 1 else None)
+            expected_prior = GENESIS if seq == 1 else (previous[0] if previous else None)
+            try:
+                old = json.loads(body)
+                valid_existing = (
+                    type(old) is dict and type(old.get("seq")) is int
+                    and old["seq"] == seq and _json(old) == body
+                    and expected_prior is not None and prior == expected_prior
+                    and _digest(prior, old) == digest
+                    and all(old.get(key) == value for key, value in (
+                        ("id", eid), ("actor", actor), ("kind", kind),
+                        ("session", session), ("recorded_at", recorded_at)
+                    ))
+                )
+            except (ValueError, TypeError, UnicodeError):
+                valid_existing = False
+            if not valid_existing:
+                raise IntegrityError("existing event provenance is inconsistent")
             if any(old.get(key) != val for key, val in base.items()) or (
                 explicit_time is not None and old.get("occurred_at") != explicit_time
             ):

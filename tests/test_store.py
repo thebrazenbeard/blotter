@@ -66,6 +66,43 @@ class BlotterTests(unittest.TestCase):
             self.note(event_id="stable-1", payload={"n": 3})
         self.assertEqual(self.ledger.verify()["count"], 1)
 
+    def test_idempotent_retry_rejects_noncanonical_existing_body(self):
+        self.note(event_id="stable-1", payload={"n": 2})
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                body = db.execute("SELECT body FROM events WHERE seq=1").fetchone()[0]
+                db.execute("UPDATE events SET body=? WHERE seq=1",
+                           (body[:-1] + ',"seq":1}',))
+        with self.assertRaises(IntegrityError):
+            self.note(event_id="stable-1", payload={"n": 2})
+
+    def test_idempotent_retry_accepts_valid_non_genesis_event(self):
+        self.note(event_id="prefix")
+        first = self.note(event_id="stable-2", payload={"n": 2})
+        self.assertEqual(first, self.note(event_id="stable-2", payload={"n": 2}))
+        self.assertEqual(self.ledger.verify()["count"], 2)
+
+    def test_idempotent_retry_rejects_tampered_stored_hash(self):
+        self.note(event_id="stable-1", payload={"n": 2})
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                db.execute("UPDATE events SET hash=? WHERE seq=1", ("f" * 64,))
+        with self.assertRaises(IntegrityError):
+            self.note(event_id="stable-1", payload={"n": 2})
+
+    def test_idempotent_retry_rejects_forged_canonical_field(self):
+        self.note(event_id="stable-1", payload={"n": 2})
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            with db:
+                body = db.execute("SELECT body FROM events WHERE seq=1").fetchone()[0]
+                event = json.loads(body)
+                event["operator_attested"] = True
+                db.execute("UPDATE events SET body=? WHERE seq=1",
+                           (json.dumps(event, sort_keys=True, separators=(",", ":"),
+                                       ensure_ascii=False),))
+        with self.assertRaises(IntegrityError):
+            self.note(event_id="stable-1", payload={"n": 2})
+
     def test_redaction_and_export(self):
         ev = self.note(payload={"password": "secret", "token": "secret-token", "nested": [{"api_key": "hidden"}]})
         self.assertEqual(ev["payload"]["password"], "[REDACTED]")
