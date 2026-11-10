@@ -1,8 +1,10 @@
 """Wire- and authority-boundary tests for the dependency-free MCP adapter."""
 import ctypes
+import base64
 import io
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -12,6 +14,7 @@ from unittest import mock
 from agent_blotter import Blotter, BlotterError
 from agent_blotter.mcp_stdio import (BlotterMCP, MAX_INPUT_BYTES,
                                      _check_windows_token_acl, _load_token_file,
+                                     _trusted_windows_powershell,
                                      _validate_config_url, main as mcp_main)
 from agent_blotter.remote import RemoteBlotter
 from agent_blotter.server import create_server
@@ -69,13 +72,14 @@ class StdioAdapterTests(unittest.TestCase):
         self.assertEqual(result["result"]["capabilities"], {"tools": {"listChanged": False}})
         self.bridge.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-    def test_requires_handshake_and_exposes_only_three_tools(self):
+    def test_requires_handshake_and_exposes_only_ledger_tools(self):
         before = self.bridge.handle(rpc(1, "tools/list"))
         self.assertEqual(before["error"]["code"], -32002)
         self.initialize()
         tools = self.bridge.handle(rpc(2, "tools/list"))["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools],
-                         ["begin_turn", "latest20", "record_activity"])
+                         ["begin_turn", "latest20", "record_activity",
+                          "read_turn_page", "acknowledge_turn_page"])
         for tool in tools:
             self.assertFalse(any("token" in str(prop).lower()
                                  for prop in tool["inputSchema"]["properties"]))
@@ -286,6 +290,238 @@ class StdioAdapterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _check_windows_token_acl(Path("C:/private/agent.token"))
             self.assertEqual(run.call_count, 0)
+
+    def test_windows_token_read_must_bind_acl_and_bytes_to_same_handle(self):
+        """A path read after a separate ACL check can consume swapped bytes."""
+        trusted = "T" * 40
+        swapped = "X" * 40
+        class Process:
+            returncode = 0
+            stdout = base64.b64encode(trusted.encode("utf-8")).decode("ascii")
+        path = Path(self.temp.name, "synthetic-actor.token")
+        # Public fixture text only; no runtime credential is written here.
+        path.write_text("T" * 40, encoding="utf-8")
+        with mock.patch("agent_blotter.mcp_stdio.os", wraps=os) as platform, \
+             mock.patch("agent_blotter.mcp_stdio._trusted_windows_powershell",
+                        return_value=r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"), \
+             mock.patch("agent_blotter.mcp_stdio._check_windows_token_acl"), \
+             mock.patch("agent_blotter.mcp_stdio.subprocess.run", return_value=Process()) as run, \
+             mock.patch.object(Path, "read_text", return_value=swapped) as unsafe_read:
+            platform.name = "nt"
+            self.assertEqual(_load_token_file(path), trusted)
+        unsafe_read.assert_not_called()
+        script = run.call_args.args[0][-1]
+        self.assertIn("$stream.GetAccessControl()", script)
+        self.assertIn("$stream.Read(", script)
+        # This source-level A/B test covers same-handle ACL/content. Reparse
+        # policy is asserted separately by the real Windows swap oracle.
+        self.assertTrue("FILE_SHARE_READ" in script or "[IO.FileShare]::Read" in script)
+        self.assertNotIn("Get-Acl -LiteralPath", script)
+
+    def test_windows_handle_bound_read_fails_closed_on_bad_process_result(self):
+        path = Path(self.temp.name, "synthetic-actor.token")
+        path.write_text("T" * 40, encoding="utf-8")
+        for status, output in ((5, ""), (0, ""), (0, "not-base64!?"),
+                               (0, base64.b64encode(b"short").decode("ascii"))):
+            with self.subTest(status=status, output=output), \
+                 mock.patch("agent_blotter.mcp_stdio.os", wraps=os) as platform, \
+                 mock.patch("agent_blotter.mcp_stdio._trusted_windows_powershell",
+                            return_value=r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"), \
+                 mock.patch("agent_blotter.mcp_stdio.subprocess.run") as run:
+                platform.name = "nt"
+                run.return_value.returncode = status
+                run.return_value.stdout = output
+                with self.assertRaises(ValueError):
+                    _load_token_file(path)
+
+    def test_symlink_token_is_rejected_before_credential_helper(self):
+        target = Path(self.temp.name, "synthetic-target")
+        target.write_text("T" * 40, encoding="utf-8")
+        link = Path(self.temp.name, "synthetic-actor.token")
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation unavailable on this host")
+        with mock.patch("agent_blotter.mcp_stdio.subprocess.run") as run:
+            with self.assertRaises(ValueError):
+                _load_token_file(link)
+        run.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows ACLs and .NET Framework FileStream")
+    def test_real_windows_handle_bound_fixture_accepts_private_and_denies_broad_acl(self):
+        """Exercise actual Windows FileStream ACL/content on synthetic tokens only."""
+        acl_script = r"""
+$ErrorActionPreference = 'Stop'
+$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$security = [System.Security.AccessControl.FileSecurity]::new()
+$security.SetOwner($owner)
+$security.SetAccessRuleProtection($true, $false)
+$full = [System.Security.AccessControl.FileSystemRights]::FullControl
+$read = [System.Security.AccessControl.FileSystemRights]::Read
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($owner, $full, $allow))
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, $full, $allow))
+if ($env:BLOTTER_FIXTURE_BROAD -eq 'yes') {
+    $everyone = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+    $security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($everyone, $read, $allow))
+}
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_PATH, $security)
+"""
+        trusted = "T" * 40
+        for broad in (False, True):
+            with self.subTest(broad=broad):
+                path = Path(self.temp.name, "synthetic-broad.token" if broad else "synthetic-private.token")
+                # Public fixture text only; no runtime credential is written here.
+                path.write_text("T" * 40, encoding="utf-8")
+                setup = subprocess.run(
+                    [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", acl_script],
+                    env=dict(os.environ, BLOTTER_FIXTURE_PATH=str(path),
+                             BLOTTER_FIXTURE_BROAD="yes" if broad else "no"),
+                    capture_output=True, text=True, timeout=10, check=False)
+                self.assertEqual(setup.returncode, 0,
+                                 "synthetic fixture ACL setup failed (no credential displayed)")
+                if broad:
+                    with self.assertRaises(ValueError):
+                        _load_token_file(path)
+                else:
+                    self.assertEqual(_load_token_file(path), trusted)
+
+    @unittest.skipUnless(os.name == "nt", "requires actual Windows reparse semantics")
+    def test_real_windows_reparse_swap_after_preflight_is_rejected(self):
+        """Hostile A/B: a symlink replacing A at open must not yield B.
+
+        Only synthetic files under this test's disposable directory are touched.
+        The test inserts its interlock *into an in-memory PowerShell script* at
+        the open point; production source has no test-triggered interlock.
+        """
+        path_a = Path(self.temp.name, "synthetic-original-a.token")
+        path_b = Path(self.temp.name, "synthetic-swap-target-b.token")
+        backup = Path(self.temp.name, "synthetic-original-a.backup")
+        probe = Path(self.temp.name, "synthetic-probe-link")
+        path_a.write_text("A" * 40, encoding="utf-8")
+        path_b.write_text("B" * 40, encoding="utf-8")
+        try:
+            # Retain the replacement link: Python can use Developer Mode's
+            # unprivileged creation, while PowerShell New-Item may still deny
+            # it. The interlock moves this real link at the file-open boundary.
+            probe.symlink_to(path_b)
+        except (OSError, NotImplementedError):
+            self.skipTest("this Windows runner cannot create synthetic file symlinks")
+
+        acl_script = r"""
+$ErrorActionPreference = 'Stop'
+$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$security = [System.Security.AccessControl.FileSecurity]::new()
+$security.SetOwner($owner)
+$security.SetAccessRuleProtection($true, $false)
+$full = [System.Security.AccessControl.FileSystemRights]::FullControl
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($owner, $full, $allow))
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, $full, $allow))
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_PATH_A, $security)
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_PATH_B, $security)
+"""
+        setup = subprocess.run(
+            [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", acl_script],
+            env=dict(os.environ, BLOTTER_FIXTURE_PATH_A=str(path_a),
+                     BLOTTER_FIXTURE_PATH_B=str(path_b)),
+            capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(setup.returncode, 0, "synthetic ACL fixture setup failed")
+
+        # The original candidate has a path-only attributes preflight before
+        # File.Open; the successor must open with OPEN_REPARSE_POINT itself.
+        race_hook = r"""
+Move-Item -LiteralPath $env:BLOTTER_MCP_TOKEN_PATH -Destination $env:BLOTTER_MCP_SWAP_BACKUP -ErrorAction Stop
+Move-Item -LiteralPath $env:BLOTTER_MCP_SWAP_LINK -Destination $env:BLOTTER_MCP_TOKEN_PATH -ErrorAction Stop
+"""
+        old_open = "$stream = [IO.File]::Open($env:BLOTTER_MCP_TOKEN_PATH,"
+        new_open = "$handle = [BlotterNativeFile]::OpenNoReparse($env:BLOTTER_MCP_TOKEN_PATH)"
+        real_run = subprocess.run
+        staged_results = []
+
+        def staged_race(command, **kwargs):
+            source = command[-1]
+            marker = old_open if old_open in source else new_open
+            self.assertIn(marker, source, "expected Windows open boundary absent")
+            modified = source.replace(marker, race_hook + "\n" + marker, 1)
+            env = dict(kwargs["env"], BLOTTER_MCP_SWAP_BACKUP=str(backup),
+                       BLOTTER_MCP_SWAP_LINK=str(probe))
+            result = real_run([*command[:-1], modified], **dict(kwargs, env=env))
+            staged_results.append(result)
+            return result
+
+        with mock.patch("agent_blotter.mcp_stdio.subprocess.run", side_effect=staged_race):
+            with self.assertRaises(ValueError):
+                _load_token_file(path_a)
+        self.assertTrue(path_a.is_symlink(), "A-to-B swap never executed")
+        self.assertEqual(path_a.resolve(), path_b.resolve())
+        self.assertEqual(len(staged_results), 1)
+        # Any generic failure can accidentally make assertRaises pass. The
+        # precise release oracle is an explicit reparse rejection on the
+        # *opened handle*, even when B has an otherwise accepted private ACL.
+        self.assertNotEqual(staged_results[0].returncode, 0)
+        self.assertIn("Private token reparse point rejected", staged_results[0].stderr)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory-reparse semantics")
+    def test_real_windows_parent_reparse_redirect_is_rejected(self):
+        """Even a trusted-looking leaf token must reject a symlink ancestor.
+
+        Synthetic A/B files only; no actual actor token or host service.
+        """
+        root = Path(self.temp.name, "synthetic-parent-redirect")
+        parent = root / "original-parent"
+        target = root / "replacement-parent"
+        saved = root / "saved-original"
+        parent.mkdir(parents=True)
+        target.mkdir()
+        token_a = parent / "actor.token"
+        token_b = target / "actor.token"
+        token_a.write_text("A" * 40, encoding="utf-8")
+        token_b.write_text("B" * 40, encoding="utf-8")
+        acl_script = r"""
+$ErrorActionPreference = 'Stop'
+$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$security = [System.Security.AccessControl.FileSecurity]::new()
+$security.SetOwner($owner)
+$security.SetAccessRuleProtection($true, $false)
+$full = [System.Security.AccessControl.FileSystemRights]::FullControl
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($owner, $full, $allow))
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, $full, $allow))
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_PATH_A, $security)
+[IO.File]::SetAccessControl($env:BLOTTER_FIXTURE_PATH_B, $security)
+"""
+        setup = subprocess.run(
+            [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", acl_script],
+            env=dict(os.environ, BLOTTER_FIXTURE_PATH_A=str(token_a),
+                     BLOTTER_FIXTURE_PATH_B=str(token_b)),
+            capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(setup.returncode, 0, "synthetic private ACL fixture setup failed")
+        self.assertEqual(_load_token_file(token_a), "A" * 40)
+        parent.rename(saved)
+        try:
+            parent.symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("this Windows runner cannot create synthetic directory symlinks")
+        self.assertTrue(token_a.is_file())
+        self.assertFalse(token_a.is_symlink(), "the leaf must not itself be a symlink")
+
+        real_run = subprocess.run
+        results = []
+        def collect(command, **kwargs):
+            result = real_run(command, **kwargs)
+            results.append(result)
+            return result
+
+        with mock.patch("agent_blotter.mcp_stdio.subprocess.run", side_effect=collect):
+            with self.assertRaises(ValueError):
+                _load_token_file(token_a)
+        self.assertEqual(len(results), 1)
+        self.assertNotEqual(results[0].returncode, 0)
+        self.assertIn("Private token resolved parent path rejected", results[0].stderr)
 
     def test_pinned_urls_reject_credential_exfiltration_destinations(self):
         self.assertEqual(_validate_config_url(self.bridge.client.url), self.bridge.client.url)

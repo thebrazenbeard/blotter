@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-from .remote import RemoteBlotter
+from .remote import RemoteBlotter, _decode_response
 from .probe import _read_private_token, _target_trusted
 from .store import BlotterError, GENESIS, _valid_id
 
@@ -37,6 +37,82 @@ def _exclusive_cursor(lock_path: Path):
             else:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
+
+def _cursor_key(actor: str) -> str:
+    """Keep arbitrary valid actor identifiers out of filesystem paths."""
+    return "actor-" + hashlib.sha256(actor.encode("utf-8")).hexdigest()
+
+
+def _cursor_hash_valid(value: object) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and all(char in "0123456789abcdef" for char in value))
+
+
+class _CursorEncodingBudget:
+    """Validate the persistence encoder without retaining another private copy."""
+
+    def __init__(self):
+        self.remaining = 3_500_000
+
+    def write(self, value: str) -> int:
+        self.remaining -= len(value)
+        if self.remaining < 0:
+            raise ValueError("oversized encoded cursor state")
+        return len(value)
+
+
+def _load_cursor_state(client: RemoteBlotter, folder: Path, *,
+                       re_enroll_legacy: bool = False) -> dict:
+    """Read the actor state while its process lock is held; never reset it."""
+    actor = _valid_id(client.actor, "actor")
+    path = folder / (_cursor_key(actor) + ".json")
+    if not path.exists():
+        # Older clients used literal actor filenames, including nested paths.
+        parts = actor.split("/")
+        safe = all(part not in ("", ".", "..") and
+                   (os.name != "nt" or ":" not in part) for part in parts)
+        if not re_enroll_legacy:
+            if not safe:
+                raise BlotterError("ambiguous legacy actor path; deliberate re-enrollment required")
+            if folder.joinpath(*parts[:-1], parts[-1] + ".json").exists():
+                raise BlotterError("legacy cursor detected; archive and deliberately re-enroll after reviewing history")
+        return {"url": client.url, "cursor": 0, "cursor_hash": GENESIS}
+    try:
+        # Pending delivery is bounded; a corrupt state file must not be an
+        # unbounded read. Do not echo private record bodies on parse failure.
+        with path.open("r", encoding="utf-8") as source:
+            raw = source.read(3_500_001)
+        if len(raw) > 3_500_000:
+            raise ValueError("oversized cursor state")
+        saved = _decode_response(raw.encode("utf-8"))
+        # Some Python versions decode nesting that json.dump cannot persist.
+        # Exercise that SAME encoder before any remote check can add a marker.
+        json.dump(saved, _CursorEncodingBudget(), separators=(",", ":"), allow_nan=False)
+    except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+        raise BlotterError("cursor belongs to another ledger or is invalid") from exc
+    if (not isinstance(saved, dict) or saved.get("url") != client.url
+            or type(saved.get("cursor")) is not int or saved["cursor"] < 0
+            or not _cursor_hash_valid(saved.get("cursor_hash"))
+            or (saved["cursor"] == 0 and saved["cursor_hash"] != GENESIS)):
+        raise BlotterError("cursor belongs to another ledger or is invalid")
+    return saved
+
+
+def _write_cursor_state(folder: Path, actor: str, saved: dict) -> None:
+    """Atomically replace the ONE actor document, including pending delivery."""
+    key = _cursor_key(actor)
+    fd, temp = tempfile.mkstemp(dir=str(folder), prefix=key + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(saved, out, separators=(",", ":"), allow_nan=False)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temp, folder / (key + ".json"))
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
 def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: int = 100,
                re_enroll_legacy: bool = False) -> dict:
     """Read all unseen global events and persist an actor-specific cursor."""
@@ -44,34 +120,11 @@ def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: i
     actor = _valid_id(client.actor, "actor")
     folder = Path(state_dir)
     folder.mkdir(parents=True, exist_ok=True)
-    # Actor identifiers can contain '/' and ':'. Never use them as paths.
-    cursor_key = "actor-" + hashlib.sha256(actor.encode("utf-8")).hexdigest()
-    path = folder / (cursor_key + ".json")
-    # Legacy cursors used raw actor filenames, including safe nested paths.
-    # Inspect only literal, non-traversing path components. Never resolve
-    # actor-provided "." or ".." segments or use a legacy path for writing.
-    legacy_parts = actor.split("/")
-    legacy_path_safe = all(part not in ("", ".", "..") and
-                           (os.name != "nt" or ":" not in part)
-                           for part in legacy_parts)
-    if not path.exists() and not re_enroll_legacy:
-        if not legacy_path_safe:
-            raise BlotterError("ambiguous legacy actor path; deliberate re-enrollment required")
-        old_path = folder.joinpath(*legacy_parts[:-1], legacy_parts[-1] + ".json")
-        if old_path.exists():
-            raise BlotterError("legacy cursor detected; archive and deliberately re-enroll after reviewing history")
-    with _exclusive_cursor(folder / (cursor_key + ".lock")):
-        cursor = 0
-        cursor_hash = GENESIS
-        if path.exists():
-            saved = json.loads(path.read_text(encoding="utf-8"))
-            if (not isinstance(saved, dict) or saved.get("url") != client.url
-                    or type(saved.get("cursor")) is not int or saved["cursor"] < 0
-                    or not isinstance(saved.get("cursor_hash"), str)
-                    or len(saved["cursor_hash"]) != 64):
-                raise BlotterError("cursor belongs to another ledger or is invalid")
-            cursor = saved["cursor"]
-            cursor_hash = saved["cursor_hash"]
+    with _exclusive_cursor(folder / (_cursor_key(actor) + ".lock")):
+        saved = _load_cursor_state(client, folder, re_enroll_legacy=re_enroll_legacy)
+        if "pending_page" in saved:
+            raise BlotterError("pending turn page must be read and acknowledged before begin_turn")
+        cursor, cursor_hash = saved["cursor"], saved["cursor_hash"]
         start = cursor
         seen = []
         pages = 0
@@ -96,16 +149,8 @@ def begin_turn(client: RemoteBlotter, state_dir: Path, *, session: str, limit: i
             cursor_hash = next_hash
             marker = result["check_event"]
             if not result["has_more"]: break
-        fd, temp = tempfile.mkstemp(dir=str(folder), prefix=cursor_key+".", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as out:
-                json.dump({"url":client.url,"cursor":cursor,
-                           "cursor_hash":cursor_hash},out,separators=(",",":"))
-                out.flush()
-                os.fsync(out.fileno())
-            os.replace(temp, path)
-        finally:
-            if os.path.exists(temp): os.unlink(temp)
+        _write_cursor_state(folder, actor, {"url": client.url, "cursor": cursor,
+                                            "cursor_hash": cursor_hash})
         return {"actor":actor,"session":session,"previous_cursor":start,
                 "cursor":cursor,"cursor_hash":cursor_hash,
                 "pages":pages,"events":seen,"check_event":marker}

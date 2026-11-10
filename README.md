@@ -94,6 +94,15 @@ turn catch-up, a latest-20 view, and explicit activity append, see
 [MCP stdio adapter](docs/MCP_STDIO.md). This does not automatically install
 tools into ChatGPT or make a private Lappy tailnet endpoint reachable.
 
+For Codex desktop, [host integration](docs/CODEX_INTEGRATION.md) supplies
+turn-start reminders and automatic observations of supported tool returns.
+The host must install and trust its exact hook definitions and bind a private
+credential. A hook reminder does not prove that history was read. Use the MCP
+`read_turn_page` / `acknowledge_turn_page` pair to read all unseen pages before
+starting work. Interrupted pages replay; a cursor advances only after explicit
+acknowledgment. Each chat or child uses a separate stable reader scope, while
+all readers still observe the same central ledger.
+
 For failures that need to be separated into configuration, authentication,
 connectivity, and API-version problems, see [Blotter diagnostics](docs/DIAGNOSTICS.md).
 The read-only-by-default `blotter-doctor` command checks authenticated health

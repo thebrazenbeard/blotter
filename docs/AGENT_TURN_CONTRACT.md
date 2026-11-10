@@ -20,10 +20,17 @@ HTTPS and do not inherit ambient `HTTP_PROXY` or `HTTPS_PROXY` settings.
 
 The `--token-file` option on POSIX accepts only an owner-owned regular file
 with mode `0600` or stricter, a single link, and no final-component symlink.
-On Windows, `--token-file` is rejected until a verified NTFS DACL-aware loader
-exists. For Windows use a **process-scoped** `BLOTTER_TOKEN` injected by a
-trusted credential manager, never a CLI argument or persistent user/machine
-environment setting. Each node requires its own server-bound actor identity.
+On Windows, `--token-file` reuses the existing opened-handle DACL/reparse
+reader: private owner/SYSTEM access and the bytes must verify on that handle.
+File denial does not fall back to another credential. Alternatively use a
+**process-scoped** `BLOTTER_TOKEN` injected by a trusted credential manager,
+never a CLI argument or persistent user/machine environment setting. Each
+node requires its own server-bound actor identity.
+
+This paragraph describes **`blotter-turn`**, not the separate host-launched
+`blotter-mcp` adapter. Both reuse the Windows handle-bound token-file reader
+described in [MCP_STDIO.md](MCP_STDIO.md); its presence in source does
+not establish that a ChatGPT runtime registered it or received a credential.
 
 **Important:** `blotter-turn begin` invokes `POST /v1/check`, which appends a
 `turn.checked` event to the central ledger **for each catch-up page**. It is

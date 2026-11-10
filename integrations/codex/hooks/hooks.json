@@ -1,0 +1,29 @@
+{
+  "description": "Template: replace interpreter placeholders with reviewed absolute paths before host trust",
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{
+      "type": "command",
+      "command": "\"/REPLACE_WITH_APPROVED_PYTHON/bin/python3\" -I -m agent_blotter.codex_hooks",
+      "commandWindows": "\"C:/REPLACE_WITH_APPROVED_PYTHON/python.exe\" -I -m agent_blotter.codex_hooks",
+      "timeout": 15
+    }]}],
+    "SubagentStart": [{"hooks": [{
+      "type": "command",
+      "command": "\"/REPLACE_WITH_APPROVED_PYTHON/bin/python3\" -I -m agent_blotter.codex_hooks",
+      "commandWindows": "\"C:/REPLACE_WITH_APPROVED_PYTHON/python.exe\" -I -m agent_blotter.codex_hooks",
+      "timeout": 15
+    }]}],
+    "PostToolUse": [{"hooks": [{
+      "type": "command",
+      "command": "\"/REPLACE_WITH_APPROVED_PYTHON/bin/python3\" -I -m agent_blotter.codex_hooks",
+      "commandWindows": "\"C:/REPLACE_WITH_APPROVED_PYTHON/python.exe\" -I -m agent_blotter.codex_hooks",
+      "timeout": 15
+    }]}],
+    "Stop": [{"hooks": [{
+      "type": "command",
+      "command": "\"/REPLACE_WITH_APPROVED_PYTHON/bin/python3\" -I -m agent_blotter.codex_hooks",
+      "commandWindows": "\"C:/REPLACE_WITH_APPROVED_PYTHON/python.exe\" -I -m agent_blotter.codex_hooks",
+      "timeout": 15
+    }]}]
+  }
+}

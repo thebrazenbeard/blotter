@@ -159,7 +159,12 @@ class Blotter:
         for source_id in sources:
             _valid_id(source_id, "source_id")
         base = {
-            "v": SCHEMA_VERSION, "id": _valid_id(event_id, "event_id") if event_id else str(uuid.uuid4()),
+            # Only omitted IDs may be generated. An explicit false-y value
+            # must fail validation rather than lose caller retry identity.
+            "v": SCHEMA_VERSION, "id": (
+                _valid_id(event_id, "event_id") if event_id is not None
+                else str(uuid.uuid4())
+            ),
             "actor": actor, "kind": kind, "session": session, "level": level,
             "evidence": evidence, "message": message, "payload": _redact(payload),
             "source_ids": sources, "effect": effect, "correlation_id": correlation_id,
@@ -170,9 +175,34 @@ class Blotter:
     def _append_locked(self, db: sqlite3.Connection, base: dict[str, Any],
                        occurred_at: str | None) -> dict[str, Any]:
         explicit_time = _utc(occurred_at) if occurred_at is not None else None
-        existing = db.execute("SELECT body FROM events WHERE id=?", (base["id"],)).fetchone()
+        existing = db.execute(
+            "SELECT seq,id,actor,kind,session,recorded_at,body,prev_hash,hash "
+            "FROM events WHERE id=?", (base["id"],)
+        ).fetchone()
         if existing:
-            old = json.loads(existing[0])
+            # A retry must not acknowledge a corrupted stored row. This is a
+            # bounded row/adjacent-link check, not full-history verification or
+            # protection against coherent database replacement and rollback.
+            seq, eid, actor, kind, session, recorded_at, body, prior, digest = existing
+            previous = (db.execute("SELECT hash FROM events WHERE seq=?", (seq - 1,)).fetchone()
+                        if seq > 1 else None)
+            expected_prior = GENESIS if seq == 1 else (previous[0] if previous else None)
+            try:
+                old = json.loads(body)
+                valid_existing = (
+                    type(old) is dict and type(old.get("seq")) is int
+                    and old["seq"] == seq and _json(old) == body
+                    and expected_prior is not None and prior == expected_prior
+                    and _digest(prior, old) == digest
+                    and all(old.get(key) == value for key, value in (
+                        ("id", eid), ("actor", actor), ("kind", kind),
+                        ("session", session), ("recorded_at", recorded_at)
+                    ))
+                )
+            except (ValueError, TypeError, UnicodeError):
+                valid_existing = False
+            if not valid_existing:
+                raise IntegrityError("existing event provenance is inconsistent")
             if any(old.get(key) != val for key, val in base.items()) or (
                 explicit_time is not None and old.get("occurred_at") != explicit_time
             ):
@@ -234,21 +264,65 @@ class Blotter:
                 latest = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
                 if after_seq > latest:
                     raise BlotterError("cursor is beyond this ledger head")
+                # A saved checkpoint hash alone is not proof that its event
+                # body still matches the digest. Revalidate the cursor row and
+                # every returned event before recording a successful check.
+                cursor_hash = GENESIS
+                if after_seq:
+                    checkpoint = db.execute(
+                        "SELECT body,prev_hash,hash FROM events WHERE seq=?",
+                        (after_seq,),
+                    ).fetchone()
+                    preceding = (None if after_seq == 1 else
+                                 db.execute("SELECT hash FROM events WHERE seq=?",
+                                            (after_seq - 1,)).fetchone())
+                    if checkpoint is None or (after_seq > 1 and preceding is None):
+                        raise IntegrityError("cursor checkpoint is missing")
+                    expected_prior = GENESIS if after_seq == 1 else preceding[0]
+                    try:
+                        checkpoint_event = json.loads(checkpoint[0])
+                        valid_checkpoint = (
+                            type(checkpoint_event) is dict
+                            and checkpoint_event.get("seq") == after_seq
+                            and _json(checkpoint_event) == checkpoint[0]
+                            and checkpoint[1] == expected_prior
+                            and _digest(checkpoint[1], checkpoint_event) == checkpoint[2]
+                        )
+                    except (ValueError, TypeError, UnicodeError):
+                        valid_checkpoint = False
+                    if not valid_checkpoint:
+                        raise IntegrityError("cursor checkpoint event is inconsistent")
+                    cursor_hash = checkpoint[2]
                 if expected_after_hash is not None:
                     if (not isinstance(expected_after_hash, str) or
                             not re.fullmatch(r"[0-9a-f]{64}", expected_after_hash)):
                         raise BlotterError("invalid cursor checkpoint hash")
-                    prior = (GENESIS if after_seq == 0 else
-                             db.execute("SELECT hash FROM events WHERE seq=?",
-                                        (after_seq,)).fetchone()[0])
-                    if prior != expected_after_hash:
+                    if cursor_hash != expected_after_hash:
                         raise BlotterError("cursor history mismatch; ledger was replaced or rewritten")
                 rows = db.execute(
-                    "SELECT body FROM events WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?",
+                    "SELECT seq,body,prev_hash,hash FROM events "
+                    "WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?",
                     (after_seq, latest, limit + 1),
                 ).fetchall()
+                previous = cursor_hash
+                for expected_seq, (seq, body, prior, stored) in enumerate(
+                    rows, start=after_seq + 1
+                ):
+                    try:
+                        event = json.loads(body)
+                        valid_event = (
+                            type(event) is dict and seq == expected_seq
+                            and _json(event) == body
+                            and event.get("seq") == seq and prior == previous
+                            and _digest(prior, event) == stored
+                        )
+                    except (ValueError, TypeError, UnicodeError):
+                        valid_event = False
+                    if not valid_event:
+                        raise IntegrityError("returned activity chain is inconsistent")
+                    previous = stored
                 has_more = len(rows) > limit
-                events = [json.loads(row[0]) for row in rows[:limit]]
+                events = [json.loads(row[1]) for row in rows[:limit]]
                 last_seen = events[-1]["seq"] if events else after_seq
                 marker = self._base(
                     actor=actor, session=session, kind="turn.checked",
@@ -317,6 +391,11 @@ class Blotter:
                 count += 1
                 try:
                     event = json.loads(body)
+                    # Re-serializing parsed JSON alone would accept a body
+                    # rewritten with duplicate keys or irrelevant whitespace.
+                    # Full-chain verification must cover canonical stored bytes.
+                    if type(event) is not dict or _json(event) != body:
+                        raise ValueError("noncanonical event body")
                     calculated = _digest(previous, event)
                 except (ValueError, TypeError, BlotterError) as exc:
                     raise IntegrityError(f"invalid event at sequence {seq}") from exc

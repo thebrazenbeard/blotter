@@ -157,7 +157,8 @@ class ProbeTests(unittest.TestCase):
 
     def test_token_file_is_denied_when_windows_acl_cannot_be_verified(self):
         from agent_blotter.probe import _read_private_token
-        with mock.patch("agent_blotter.probe.os.name", "nt"):
+        with mock.patch("agent_blotter.probe.os.name", "nt"), mock.patch(
+                "agent_blotter.probe._load_token_file", side_effect=ValueError("unverified ACL")):
             with self.assertRaises(PermissionError):
                 _read_private_token(self.secret_file)
 

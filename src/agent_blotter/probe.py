@@ -47,14 +47,25 @@ def _error_code(exc: BaseException, *, stage: str) -> str:
     return "READ_FAILED" if stage != "append" else "APPEND_FAILED"
 
 
-def _read_private_token(path: Path) -> str:
-    """Use an owner-only, single-link regular file; fail closed on Windows.
+def _load_token_file(path: Path) -> str:
+    # Defer import: mcp_stdio -> turn -> probe is the existing module graph.
+    # The verified reader is needed only after these modules finish loading.
+    from .mcp_stdio import _load_token_file as verified_reader
+    return verified_reader(path)
 
-    The stdlib has no reliable Windows DACL inspection. Windows operators use
-    a process-scoped BLOTTER_TOKEN supplied by their credential manager until
-    an audited Windows file loader is available. POSIX O_NOFOLLOW and fstat
-    bind the permission check to the file descriptor actually being read.
+
+def _read_private_token(path: Path) -> str:
+    """Use verified private files without putting bearer tokens in arguments.
+
+    Reuse the existing Windows opened-handle DACL/reparse reader. POSIX keeps
+    its no-follow, owner-only, single-link descriptor check. A file-verification
+    failure never falls back to a different environment credential.
     """
+    if os.name == "nt":
+        try:
+            return _load_token_file(path)
+        except (ValueError, OSError) as exc:
+            raise PermissionError("private token file could not be verified") from exc
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
         raise PermissionError("token-file ACL cannot be verified on this OS")
     try:

@@ -264,7 +264,8 @@ class TurnCliCredentialTests(unittest.TestCase):
 
     def test_windows_token_file_is_denied_without_verified_acl(self):
         from agent_blotter.probe import _read_private_token
-        with mock.patch("agent_blotter.probe.os.name", "nt"):
+        with mock.patch("agent_blotter.probe.os.name", "nt"), mock.patch(
+                "agent_blotter.probe._load_token_file", side_effect=ValueError("unverified ACL")):
             with self.assertRaises(PermissionError):
                 _read_private_token(self.token_file)
 
