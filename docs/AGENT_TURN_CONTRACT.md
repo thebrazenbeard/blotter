@@ -25,6 +25,11 @@ exists. For Windows use a **process-scoped** `BLOTTER_TOKEN` injected by a
 trusted credential manager, never a CLI argument or persistent user/machine
 environment setting. Each node requires its own server-bound actor identity.
 
+This paragraph describes **`blotter-turn`**, not the separate host-launched
+`blotter-mcp` adapter. The latter has its own Windows handle-bound token-file
+reader described in [MCP_STDIO.md](MCP_STDIO.md); its presence in source does
+not establish that a ChatGPT runtime registered it or received a credential.
+
 **Important:** `blotter-turn begin` invokes `POST /v1/check`, which appends a
 `turn.checked` event to the central ledger **for each catch-up page**. It is
 not a read-only diagnostic. The default command emits **full event bodies**
