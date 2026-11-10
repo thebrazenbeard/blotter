@@ -83,6 +83,36 @@ class MCPPageTests(unittest.TestCase):
             self.assertIn(event["id"], [e["id"] for e in page["events"]])
             self.call("acknowledge_turn_page", reader=reader, receipt=page["receipt"])
 
+    def test_shared_credential_can_acknowledge_another_chats_unseen_page(self):
+        """Characterize a provenance limitation; not a security guarantee.
+
+        Caller-chosen reader names isolate cursor files, but do not authenticate
+        which chat actually consumed a page under one shared connector actor.
+        """
+        event = self.db.record(actor="peer", kind="test.executed",
+                               message="the intended chat has not read this")
+        other_chat = self.new_bridge()  # same actor credential, independent MCP client
+
+        def other_call(name, **arguments):
+            reply = other_chat.handle({"jsonrpc": "2.0", "id": 3,
+                "method": "tools/call", "params": {"name": name,
+                "arguments": arguments}})
+            self.assertNotIn("error", reply, reply)
+            self.assertFalse(reply["result"]["isError"], reply)
+            return json.loads(reply["result"]["content"][0]["text"])
+
+        stolen = other_call("read_turn_page", reader="chat-owner",
+                            session="other-chat-session")
+        self.assertIn(event["id"], [e["id"] for e in stolen["events"]])
+        other_call("acknowledge_turn_page", reader="chat-owner",
+                   receipt=stolen["receipt"])
+
+        owner_page = self.call("read_turn_page", reader="chat-owner",
+                               session="owner-session")
+        self.assertNotIn(event["id"], [e["id"] for e in owner_page["events"]])
+        self.assertEqual(stolen["actor"], "codex.host")
+        self.assertNotIn("reader", stolen["check_event"])
+
     def test_page_tools_refuse_missing_or_unsafe_reader_and_untrusted_destinations(self):
         for arguments in ({"session": "turn"}, {"session": "turn", "reader": "../other"},
                           {"session": "turn", "reader": "valid", "url": "https://other.invalid"}):
