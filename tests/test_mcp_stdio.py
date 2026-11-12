@@ -78,7 +78,7 @@ class StdioAdapterTests(unittest.TestCase):
         self.initialize()
         tools = self.bridge.handle(rpc(2, "tools/list"))["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools],
-                         ["begin_turn", "latest20", "record_activity",
+                         ["begin_turn", "latest20", "latest_activity20", "record_activity",
                           "read_turn_page", "acknowledge_turn_page"])
         for tool in tools:
             self.assertFalse(any("token" in str(prop).lower()

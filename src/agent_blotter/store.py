@@ -373,6 +373,21 @@ class Blotter:
                               (limit,)).fetchall()
         return [json.loads(body) for (body,) in reversed(rows)]
 
+    def tail_substantive(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Recent non-check activities in global order; never changes audit history.
+
+        This is a read-only projection over the SAME main ledger, not a
+        replacement for tail(), check(), or full cursor-based replay.
+        """
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise BlotterError("substantive tail limit must be 1-100")
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT body FROM events WHERE kind != ? "
+                "ORDER BY seq DESC LIMIT ?", ("turn.checked", limit)
+            ).fetchall()
+        return [json.loads(body) for (body,) in reversed(rows)]
+
     def export(self, *, after_seq: int = 0) -> Iterable[str]:
         if type(after_seq) is not int or after_seq < 0:
             raise BlotterError("after_seq must be nonnegative")
