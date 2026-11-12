@@ -10,6 +10,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 import ssl
 import stat
 import threading
@@ -18,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .store import Blotter, BlotterError, SCHEMA_VERSION, _valid_id
+from .channels import ChannelCatalog
 from .private_credentials import read_private_credentials_bytes
 
 MAX_HTTP_BODY = 70000
@@ -149,6 +151,7 @@ def create_server(
     port: int = 8832, *, certfile: str | None = None, keyfile: str | None = None,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
     max_workers: int = DEFAULT_MAX_WORKERS,
+    channels: ChannelCatalog | None = None,
 ) -> ThreadingHTTPServer:
     """Create a bound service. Non-loopback binds require server TLS."""
     if not isinstance(credentials, dict) or not credentials:
@@ -262,8 +265,23 @@ def create_server(
             actor = self._actor()
             if actor is None:
                 return
-            route = urlsplit(self.path).path
-            if route not in ("/v1/check", "/v1/record"):
+            parts = urlsplit(self.path)
+            route = parts.path
+            target = ledger
+            if route.startswith("/v1/channels/"):
+                match = re.fullmatch(r"/v1/channels/([a-z][a-z0-9_.-]{0,63})/(check|record)", route)
+                if channels is None or match is None:
+                    self.close_connection = True
+                    self._send(404, {"error": "route not found"})
+                    return
+                try:
+                    target = channels.ledger(match.group(1), actor=actor)
+                except BlotterError:
+                    self.close_connection = True
+                    self._send(404, {"error": "channel unavailable"})
+                    return
+                route = "/v1/" + match.group(2)
+            if parts.query or route not in ("/v1/check", "/v1/record"):
                 # The body has not been consumed; never parse it as a new request.
                 self.close_connection = True
                 self._send(404, {"error": "route not found"})
@@ -275,7 +293,7 @@ def create_server(
                         raise BlotterError("unknown check fields")
                     if type(obj.get("after_seq", 0)) is not int or type(obj.get("limit", 100)) is not int:
                         raise BlotterError("cursor and page size must be integers")
-                    result = ledger.check(actor=actor, session=obj.get("session", "default"),
+                    result = target.check(actor=actor, session=obj.get("session", "default"),
                                           after_seq=obj.get("after_seq", 0),
                                           limit=min(obj.get("limit", 100), MAX_HTTP_PAGE),
                                           expected_after_hash=obj.get("expected_after_hash"))
@@ -286,7 +304,7 @@ def create_server(
                         raise BlotterError("kind and message required")
                     if "source_ids" in obj and not isinstance(obj["source_ids"], list):
                         raise BlotterError("source_ids must be a JSON array")
-                    result = ledger.record(actor=actor, **obj)
+                    result = target.record(actor=actor, **obj)
                 self._send(200, result)
             except (BlotterError, ValueError, TypeError, UnicodeError) as exc:
                 self.close_connection = True
@@ -308,10 +326,32 @@ def create_server(
                 self._send(422, {"error": "GET request bodies are unsupported"})
                 return
             parts = urlsplit(self.path)
-            if parts.path == "/v1/health":
+            route = parts.path
+            target = ledger
+            if route == "/v1/health":
                 self._send(200, {"ok": True, "schema_version": SCHEMA_VERSION})
                 return
-            if parts.path not in ("/v1/events", "/v1/tail"):
+            if route == "/v1/channels":
+                if channels is None:
+                    self._send(404, {"error": "route not found"})
+                    return
+                if parts.query:
+                    self._send(422, {"error": "channel list has no query fields"})
+                    return
+                self._send(200, {"channels": channels.allowed(actor=actor)})
+                return
+            if route.startswith("/v1/channels/"):
+                match = re.fullmatch(r"/v1/channels/([a-z][a-z0-9_.-]{0,63})/(events|tail)", route)
+                if channels is None or match is None:
+                    self._send(404, {"error": "route not found"})
+                    return
+                try:
+                    target = channels.ledger(match.group(1), actor=actor)
+                except BlotterError:
+                    self._send(404, {"error": "channel unavailable"})
+                    return
+                route = "/v1/" + match.group(2)
+            if route not in ("/v1/events", "/v1/tail"):
                 self._send(404, {"error": "route not found"})
                 return
             try:
@@ -320,17 +360,17 @@ def create_server(
                 # repeated-field rejection below.
                 args = parse_qs(parts.query, strict_parsing=True,
                                 keep_blank_values=True)
-                if parts.path == "/v1/tail":
+                if route == "/v1/tail":
                     if set(args) - {"limit"} or any(len(values) != 1 for values in args.values()):
                         raise BlotterError("unknown or repeated tail query fields")
                     limit = int(args.get("limit", ["20"])[0])
-                    self._send(200, {"events": ledger.tail(limit=limit)})
+                    self._send(200, {"events": target.tail(limit=limit)})
                     return
                 if set(args) - READ_FIELDS or any(len(values) != 1 for values in args.values()):
                     raise BlotterError("unknown or repeated query fields")
                 after_seq = int(args.get("after_seq", ["0"])[0])
                 limit = min(int(args.get("limit", ["100"])[0]), MAX_HTTP_PAGE)
-                result = ledger.list(after_seq=after_seq, limit=limit,
+                result = target.list(after_seq=after_seq, limit=limit,
                                      actor=args.get("actor", [None])[0],
                                      kind=args.get("kind", [None])[0],
                                      session=args.get("session", [None])[0])
@@ -369,14 +409,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="maximum idle seconds while reading each HTTP request (default 15)")
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS,
                         help="maximum concurrent HTTP clients (default 32; 1-256)")
+    parser.add_argument("--channels-root", default=None,
+                        help="optional operator-provisioned identity channel catalog root")
     args = parser.parse_args(argv)
     try:
         ledger = Blotter(args.db)
         credentials = load_credentials(args.credentials)
+        channels = ChannelCatalog(args.channels_root) if args.channels_root else None
         server = create_server(ledger, credentials, host=args.host, port=args.port,
                                certfile=args.tls_cert, keyfile=args.tls_key,
                                request_timeout=args.request_timeout,
-                               max_workers=args.max_workers)
+                               max_workers=args.max_workers, channels=channels)
         print(f"Blotter ledger listening on {args.host}:{args.port}", flush=True)
         try:
             server.serve_forever(poll_interval=0.1)

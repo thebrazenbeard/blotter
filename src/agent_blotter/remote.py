@@ -23,6 +23,10 @@ _ERROR_RESPONSE_BYTES = 8192
 
 def _response_budget(route: str, data: dict[str, Any] | None) -> int:
     path, _, query = route.partition("?")
+    if path == "/v1/channels":
+        return _PAGE_OVERHEAD_BYTES
+    if path.startswith("/v1/channels/"):
+        path = "/v1/" + path.rsplit("/", 1)[-1]
     if path == "/v1/health":
         return _HEALTH_RESPONSE_BYTES
     if path == "/v1/record":
@@ -242,3 +246,61 @@ class RemoteBlotter:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise BlotterError("tail limit must be 1-100")
         return self._request("/v1/tail?" + urllib.parse.urlencode({"limit": limit}))["events"]
+
+
+    def channels(self) -> list[dict]:
+        """List only channels authorized for this credential-bound actor."""
+        return self._request("/v1/channels")["channels"]
+
+    def channel(self, channel_id: str) -> "RemoteChannel":
+        """Select a provisioned channel, not a view onto the main ledger."""
+        from .channels import ChannelCatalog
+        ChannelCatalog._id(channel_id)
+        if channel_id == "main":
+            raise BlotterError("use default methods for main channel")
+        return RemoteChannel(self, channel_id)
+
+
+class RemoteChannel:
+    """HTTP client for an actor-authorized, separately hash-bound channel."""
+
+    def __init__(self, parent: RemoteBlotter, channel_id: str):
+        self.parent = parent
+        self.prefix = "/v1/channels/" + channel_id
+
+    def check(self, *, session: str = "default", after_seq: int = 0,
+              limit: int = 100, expected_after_hash: str | None = None) -> dict:
+        return self.parent._request(self.prefix + "/check", {
+            "session": session, "after_seq": after_seq, "limit": limit,
+            "expected_after_hash": expected_after_hash,
+        })
+
+    def record(self, *, kind: str, message: str, session: str = "default",
+               payload: dict | None = None, level: str = "INFO",
+               evidence: str = "UNKNOWN", effect: str = "NONE",
+               source_ids: list[str] | None = None, event_id: str | None = None,
+               correlation_id: str | None = None, occurred_at: str | None = None) -> dict:
+        if source_ids is not None and not isinstance(source_ids, list):
+            raise BlotterError("source_ids must be a list")
+        return self.parent._request(self.prefix + "/record", {
+            "kind": kind, "message": message, "session": session,
+            "payload": {} if payload is None else payload,
+            "level": level, "evidence": evidence, "effect": effect,
+            "source_ids": [] if source_ids is None else source_ids, "event_id": event_id,
+            "correlation_id": correlation_id, "occurred_at": occurred_at,
+        })
+
+    def list(self, *, after_seq: int = 0, limit: int = 100,
+             actor: str | None = None, kind: str | None = None,
+             session: str | None = None) -> list[dict]:
+        params = {"after_seq": after_seq, "limit": limit, "actor": actor,
+                  "kind": kind, "session": session}
+        query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+        return self.parent._request(self.prefix + "/events?" + query)["events"]
+
+    def tail(self, *, limit: int = 20) -> list[dict]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise BlotterError("tail limit must be 1-100")
+        return self.parent._request(
+            self.prefix + "/tail?" + urllib.parse.urlencode({"limit": limit})
+        )["events"]

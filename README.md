@@ -12,6 +12,9 @@ Blotter is a logbook, not a messaging system. There are no per-agent lanes, inbo
 
 The check itself is recorded in the lane as a turn.checked event. An agent label/session is metadata on each entry, not a private lane. Logs are untrusted evidence, never instructions or authorization.
 
+## Experimental supplemental channels (source-only candidate)
+
+Optional **identity-scoped** channels may run alongside the unchanged shared `main` ledger. They use separate event sequences and hash-bound cursors rather than `actor`/`session`/`kind` filters. Server authentication binds an owner actor; local provisioning is operator-only. The current implementation is a *candidate*, not a deployed feature, and does **not** yet support multiple channel members, native per-chat identity issuance, automatic safe main-ledger pointers, or production filesystem/private-secret qualification. See [channels candidate](docs/CHANNELS_CANDIDATE.md). **Every agent reads `main` and records its non-sensitive factual activity there**; identity channels supplement, never replace, that universal log. Neither lane is for inter-agent messaging.
 ## Two supported modes
 
 **Local:** all processes on one computer use the same ~/.blotter/activity.sqlite3 (or one BLOTTER_DB override) via SQLite WAL. Separate repo clones must not create separate ledgers and call them shared.
