@@ -27,12 +27,13 @@ def _response_budget(route: str, data: dict[str, Any] | None) -> int:
         return _HEALTH_RESPONSE_BYTES
     if path == "/v1/record":
         return MAX_EVENT_BYTES + _PAGE_OVERHEAD_BYTES
-    if path in ("/v1/tail", "/v1/events", "/v1/check"):
+    if path in ("/v1/tail", "/v1/substantive-tail", "/v1/events", "/v1/check"):
         if path == "/v1/check":
             raw_limit = (data or {}).get("limit", 100)
         else:
             params = urllib.parse.parse_qs(query)
-            raw_limit = params.get("limit", [20 if path == "/v1/tail" else 100])[0]
+            raw_limit = params.get(
+                "limit", [20 if path in ("/v1/tail", "/v1/substantive-tail") else 100])[0]
         try:
             limit = int(raw_limit)
         except (TypeError, ValueError):
@@ -242,3 +243,11 @@ class RemoteBlotter:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise BlotterError("tail limit must be 1-100")
         return self._request("/v1/tail?" + urllib.parse.urlencode({"limit": limit}))["events"]
+
+
+    def tail_substantive(self, *, limit: int = 20) -> list[dict]:
+        """Recent non-check activities; an optional read-only main projection."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise BlotterError("substantive tail limit must be 1-100")
+        query = urllib.parse.urlencode({"limit": limit})
+        return self._request("/v1/substantive-tail?" + query)["events"]

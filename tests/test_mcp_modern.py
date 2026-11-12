@@ -178,9 +178,9 @@ class ModernMCPTests(unittest.TestCase):
         for name, tool in tools.items():
             self.assertFalse(tool["annotations"]["destructiveHint"])
             self.assertFalse(tool["annotations"]["openWorldHint"])
-            self.assertEqual(tool["annotations"]["readOnlyHint"], name == "latest20")
+            self.assertEqual(tool["annotations"]["readOnlyHint"], name in ("latest20", "latest_activity20"))
             self.assertEqual(tool["annotations"]["idempotentHint"],
-                             name in ("latest20", "record_activity", "acknowledge_turn_page"))
+                             name in ("latest20", "latest_activity20", "record_activity", "acknowledge_turn_page"))
 
     def test_modern_wire_discovery_and_tool_list_are_self_contained(self):
         requests = [rpc("server/discover", modern=True, identifier=1),
