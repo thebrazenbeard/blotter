@@ -23,11 +23,13 @@ A configured server provides an optional credential-bound channel catalog:
 
 ## Exact user-approved channel inventory
 
-The project owner explicitly authorized exactly five names in the current configuration:
-`main` (global and universally readable), `vera`, `aeonith`, `vera-works`,
-and `igor`. The four supplemental names are the only valid provisioning
-targets. Their authorization is recorded independently from any claim of
-installation, credential binding, or live activation.
+This source candidate implements the following explicitly owner-authorized
+names: `main` (shared global chronology), `vera`, `aeonith`, `vera-works`,
+`igor`, and `minotaur`. `minotaur` was separately authorized on 2026-11-12;
+that authorization is recorded in Blotter issue #38. Other separately approved
+channels are being handled in distinct project work and are **not** included
+in this Minotaur-only change. Source allowance is not a claim of installation,
+credential binding, provisioning, private access or live activation.
 
 No additional agent, chat, project, or persona can create itself a channel.
 A later approval requires an explicit user correction and reviewed update
