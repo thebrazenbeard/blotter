@@ -48,12 +48,12 @@ class ChannelCatalogTests(unittest.TestCase):
         with self.assertRaises(BlotterError):
             self.channels.provision("vera", owner_actor="vera", purpose="y")
         for name in ("main", "../other", "chat/name", "other%2f", "", "Ä", "VERA",
-                     "new-agent", "other", "driftspace"):
+                     "new-agent", "other", "driftspace-child"):
             with self.subTest(name=name), self.assertRaises(BlotterError):
                 self.channels.provision(name, owner_actor="vera")
 
     def test_only_user_approved_channels_can_be_provisioned(self):
-        for channel in ("vera", "aeonith", "vera-works", "igor"):
+        for channel in ("vera", "aeonith", "vera-works", "igor", "driftspace", "minotaur"):
             with self.subTest(channel=channel):
                 self.assertEqual(self.channels.provision(
                     channel, owner_actor="actor." + channel)["channel"], channel)

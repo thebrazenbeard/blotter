@@ -23,9 +23,9 @@ A configured server provides an optional credential-bound channel catalog:
 
 ## Exact user-approved channel inventory
 
-The project owner explicitly authorized exactly five names in the current configuration:
+The project owner explicitly authorized the original five names and later separately authorized driftspace and minotaur channels:
 `main` (global and universally readable), `vera`, `aeonith`, `vera-works`,
-and `igor`. The four supplemental names are the only valid provisioning
+`igor`, `driftspace`, and `minotaur`. The six supplemental names are the only valid provisioning
 targets. Their authorization is recorded independently from any claim of
 installation, credential binding, or live activation.
 
