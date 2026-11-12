@@ -138,13 +138,29 @@ implementation. Existing POSIX directories/files with insecure permissions or
 unexpected ownership fail closed rather than being silently modified.
 SQLite WAL/SHM files reside under the owner-only directory.
 
+On Windows, a second *fail-closed verifier* uses the installed, system
+PowerShell executable to examine owner, reparse-point status and inherited
+or explicit access-control entries for every private directory, catalog DB,
+and channel DB **before contents are opened**. Allowed principals are the
+current user, SYSTEM, Administrators, and owner-identity placeholders
+(OWNER RIGHTS / CREATOR OWNER); an unexpected allow ACE (including Everyone
+or Authenticated Users) or unexpected owner fails with a generic error.
+The verifier does not silently change an existing ACL. New database files
+are created exclusively *under an already-checked private directory* and
+must themselves pass that ACL check. Windows tests introduce broadened ACEs
+**only in disposable, isolated test directories**, prove that the resulting
+configuration is refused and run positive legacy owner/API regressions.
+
 This is not full local filesystem custody: a process sharing the same OS
-identity, privileged operator, symlink/rename race by that identity, backup,
-recovery agent or host administrator may still access the contents. The
-Windows ACL and actual production process-identity binding require separate
-host-level qualification; POSIX mode bits are not a substitute for Windows
-access-control lists. No private ChatGPT channel is created by these source
-tests and the connected main-only plugin remains unchanged.
+identity, privileged operator, same-UID symlink/rename race, backup,
+recovery agent or host administrator may still access the contents. An
+untrusted parent or ACL change occurring between path checks and SQLite
+operations is not handle-bound attestation. The Windows verifier checks the
+named path and is not a final production service-identity or Windows ACL
+certification. A real Windows deployment and actual ChatGPT per-chat principal
+binding require separate independent host-level qualification. No private
+ChatGPT channel is created by these source tests and the connected main-only
+plugin remains unchanged.
 
 ## Negative controls / test scope
 
