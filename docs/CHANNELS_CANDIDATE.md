@@ -127,6 +127,25 @@ main-safe pointers with verified delivery, source cross-references, and secure
 per-identity issuance remain **unimplemented**. Existing `main` flow is the
 authoritative live Blotter until separately qualified and explicitly installed.
 
+## POSIX filesystem boundary (source candidate only)
+
+The owner-provisioned private catalog now explicitly creates its POSIX
+private directory and `ledgers` subdirectory with mode `0700`, and the
+registry and per-channel SQLite database files with `0600` using exclusive
+file creation. Under a typical `022` umask, this prevents accidental
+group/world reads that were reproduced as `0755`/ `0644` with the old
+implementation. Existing POSIX directories/files with insecure permissions or
+unexpected ownership fail closed rather than being silently modified.
+SQLite WAL/SHM files reside under the owner-only directory.
+
+This is not full local filesystem custody: a process sharing the same OS
+identity, privileged operator, symlink/rename race by that identity, backup,
+recovery agent or host administrator may still access the contents. The
+Windows ACL and actual production process-identity binding require separate
+host-level qualification; POSIX mode bits are not a substitute for Windows
+access-control lists. No private ChatGPT channel is created by these source
+tests and the connected main-only plugin remains unchanged.
+
 ## Negative controls / test scope
 
 Tests are self-contained against temporary in-process HTTP services and SQLite:

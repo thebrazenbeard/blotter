@@ -6,8 +6,10 @@ distinct credential at the HTTP service. Not a memory-admission system.
 """
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
+import stat
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -21,6 +23,48 @@ RESERVED = frozenset({"main"})
 AUTHORIZED_CHANNEL_IDS = frozenset({"aeonith", "vera", "vera-works", "igor", "driftspace", "minotaur", "realm"})
 
 
+def _private_directory(path: Path) -> None:
+    """Fail closed on a POSIX directory that another user can traverse.
+
+    This is not a Windows ACL implementation; an issuer-bound service identity
+    and OS-level deployment controls must be qualified separately.
+    """
+    if path.is_symlink():
+        raise BlotterError("channels directory may not be a symlink")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name == "posix":
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) & 0o077):
+            raise BlotterError("unsafe private channel directory permissions")
+
+
+def _private_database_file(path: Path) -> None:
+    """Atomically precreate POSIX database files with restrictive mode.
+
+    SQLITE journal companions live beneath a 0700 parent directory. The
+    same-UID file replacement threat is not solved by this helper.
+    """
+    if path.is_symlink():
+        raise BlotterError("channel database may not be a symlink")
+    if os.name != "posix":
+        return  # Windows ACL and private identity qualification remain HOLD.
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(fd)
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077):
+        raise BlotterError("unsafe private channel database permissions")
+
+
 class ChannelCatalog:
     """Operator-provisioned, one-owner channels; no client-side self-enrollment."""
 
@@ -29,14 +73,11 @@ class ChannelCatalog:
         # Do not let an attacker redirect the catalog to a different root.
         if self.root.is_symlink():
             raise BlotterError("channels root may not be a symlink")
-        self.root.mkdir(parents=True, exist_ok=True)
+        _private_directory(self.root)
         self.ledgers = self.root / "ledgers"
-        if self.ledgers.is_symlink():
-            raise BlotterError("channels directory may not be a symlink")
-        self.ledgers.mkdir(exist_ok=True)
+        _private_directory(self.ledgers)
         self.registry = self.root / "channels.sqlite3"
-        if self.registry.is_symlink():
-            raise BlotterError("channel catalog may not be a symlink")
+        _private_database_file(self.registry)
         with self._connect() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS channels (
                 id TEXT PRIMARY KEY,
@@ -116,6 +157,6 @@ class ChannelCatalog:
         if row is None or row[0] != actor:
             raise BlotterError("channel unavailable")
         path = self.ledgers / (channel_id + ".sqlite3")
-        if path.is_symlink():
-            raise BlotterError("channel ledger may not be a symlink")
+        _private_directory(self.ledgers)
+        _private_database_file(path)
         return Blotter(path)
