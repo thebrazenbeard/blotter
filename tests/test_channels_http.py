@@ -96,6 +96,34 @@ class ChannelHTTPTests(unittest.TestCase):
         self.assertEqual(self.catalog.ledger("vera", actor="agent.one")
                          .verify()["count"], 3)
 
+    def test_minotaur_private_route_and_distinct_token_scope(self):
+        # Synthetic distinct principals: this cannot qualify production
+        # ChatGPT sessions that share a connector credential.
+        self.catalog.provision("minotaur", owner_actor="agent.two",
+                               purpose="Minotaur private factual provenance")
+        private = self.two.channel("minotaur")
+        own = private.record(kind="evaluation.observed",
+                             message="private-source-receipt",
+                             event_id="minotaur-http-private-1")
+        self.assertEqual(own["seq"], 1)
+        self.assertEqual([e["message"] for e in private.tail()],
+                         ["private-source-receipt"])
+        self.assertEqual(self.one.tail(), [])
+        self.assertEqual(self.one.channels()[0]["channel"], "vera")
+        for url in ("/v1/channels/minotaur/events",
+                    "/v1/channels/minotaur/tail"):
+            req = urllib.request.Request(
+                self.url + url,
+                headers={"Authorization": "Bearer " + "A" * 40,
+                         "X-Blotter-Actor": "agent.one"})
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(req, timeout=3)
+            self.assertEqual(caught.exception.code, 404)
+            caught.exception.close()
+        self.assertEqual(self.catalog.ledger("minotaur", actor="agent.two")
+                         .verify()["count"], 1)
+        self.assertEqual(self.main.verify()["count"], 0)
+
     def test_default_server_has_no_channel_routes(self):
         # Legacy main-only behavior remains unchanged if channels are disabled.
         server = create_server(Blotter(Path(self.tmp.name) / "legacy.sqlite3"),

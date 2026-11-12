@@ -48,21 +48,42 @@ class ChannelCatalogTests(unittest.TestCase):
         with self.assertRaises(BlotterError):
             self.channels.provision("vera", owner_actor="vera", purpose="y")
         for name in ("main", "../other", "chat/name", "other%2f", "", "Ä", "VERA",
-                     "new-agent", "other", "driftspace"):
+                     "new-agent", "other", "unapproved-minotaur-copy"):
             with self.subTest(name=name), self.assertRaises(BlotterError):
                 self.channels.provision(name, owner_actor="vera")
 
     def test_only_user_approved_channels_can_be_provisioned(self):
-        for channel in ("vera", "aeonith", "vera-works", "igor"):
+        for channel in ("vera", "aeonith", "vera-works", "igor", "minotaur"):
             with self.subTest(channel=channel):
                 self.assertEqual(self.channels.provision(
                     channel, owner_actor="actor." + channel)["channel"], channel)
         self.assertEqual(
             sorted(x["channel"] for x in self.channels.allowed(actor="actor.igor")),
             ["igor"])
-        for channel in ("igor-dev", "realm", "vera-work", "new-chat"):
+        for channel in ("igor-dev", "vera-work", "new-chat", "other-team"):
             with self.subTest(reject=channel), self.assertRaises(BlotterError):
                 self.channels.provision(channel, owner_actor="actor." + channel)
+
+    def test_minotaur_is_owner_authorized_but_not_main_or_other_actors(self):
+        authorized = self.channels.provision(
+            "minotaur", owner_actor="bt2.minotaur",
+            purpose="Minotaur engineering activity and evaluator receipts")
+        self.assertEqual(authorized["channel"], "minotaur")
+        private = self.channels.ledger("minotaur", actor="bt2.minotaur")
+        saved = private.record(actor="bt2.minotaur",
+                               kind="trial.observed", message="private-case-receipt",
+                               event_id="minotaur-test-event-1")
+        self.assertEqual(saved["seq"], 1)
+        self.assertEqual(self.main.tail(), [])
+        self.assertEqual([x["channel"] for x in
+                          self.channels.allowed(actor="bt2.minotaur")],
+                         ["minotaur"])
+        self.assertEqual(self.channels.allowed(actor="vera"), [])
+        for actor in ("vera", "bt2.one.lappy"):
+            with self.subTest(actor=actor), self.assertRaisesRegex(
+                    BlotterError, "channel unavailable"):
+                self.channels.ledger("minotaur", actor=actor)
+        self.assertEqual(private.verify()["count"], 1)
 
     def test_reopen_preserves_channel_separate_cursor(self):
         self.channels.provision("vera", owner_actor="vera")
