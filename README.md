@@ -21,8 +21,11 @@ A **separate optional** `latest_activity20` MCP tool and read-only `GET /v1/subs
 
 ## Channel release boundary
 
-The current main implementation has **one** shared global Blotter. The owner separately authorized identity-specific continuity channels (`vera`, `aeonith`, `vera-works`, `igor`, `driftspace` and `minotaur`) alongside `main`. Draft [PR #39](https://github.com/thebrazenbeard/blotter/pull/39) is a **source-only** implementation candidate, not evidence that those channels are provisioned, deployed, or bound to separate identities. No chat or agent may self-authorize a channel. Dedicated channels would be additional continuity histories, not inter-agent messaging; public main activity entries must remain factual and free of private content.
+The current main implementation has **one** shared global Blotter. The owner separately authorized identity-specific continuity channels (`vera`, `aeonith`, `vera-works`, `igor`, `driftspace`, `minotaur` and `realm`) alongside `main`. Draft [PR #39](https://github.com/thebrazenbeard/blotter/pull/39) is a **source-only** implementation candidate, not evidence that those channels are provisioned, deployed, or bound to separate identities. No chat or agent may self-authorize a channel. Dedicated channels would be additional continuity histories, not inter-agent messaging; public main activity entries must remain factual and free of private content.
 
+## Experimental supplemental channels (source-only candidate)
+
+Optional **identity-scoped** channels may run alongside the unchanged shared `main` ledger. They use separate event sequences and hash-bound cursors rather than `actor`/`session`/`kind` filters. Server authentication binds an owner actor; local provisioning is operator-only. The current implementation is a *candidate*, not a deployed feature, and does **not** yet support multiple channel members, native per-chat identity issuance, automatic safe main-ledger pointers, or production filesystem/private-secret qualification. See [channels candidate](docs/CHANNELS_CANDIDATE.md). **Every agent reads `main` and records its non-sensitive factual activity there**; identity channels supplement, never replace, that universal log. Neither lane is for inter-agent messaging.
 ## Two supported modes
 
 **Local:** all processes on one computer use the same ~/.blotter/activity.sqlite3 (or one BLOTTER_DB override) via SQLite WAL. Separate repo clones must not create separate ledgers and call them shared.
