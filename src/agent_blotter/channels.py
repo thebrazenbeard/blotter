@@ -43,6 +43,11 @@ class ChannelCatalog:
                 owner_actor TEXT NOT NULL,
                 purpose TEXT NOT NULL DEFAULT ''
             )""")
+            try:
+                db.execute("CREATE UNIQUE INDEX IF NOT EXISTS "
+                           "channels_owner_unique ON channels(owner_actor)")
+            except sqlite3.IntegrityError as exc:
+                raise BlotterError("channel catalog has ambiguous owner mappings") from exc
 
     @contextmanager
     def _connect(self):
@@ -77,9 +82,17 @@ class ChannelCatalog:
             if row and row != (owner_actor, purpose):
                 raise BlotterError("channel already provisioned for another owner or purpose")
             if not row:
-                db.execute("INSERT INTO channels(id, owner_actor, purpose) VALUES (?,?,?)",
-                           (channel_id, owner_actor, purpose))
+                try:
+                    db.execute("INSERT INTO channels(id, owner_actor, purpose) VALUES (?,?,?)",
+                               (channel_id, owner_actor, purpose))
+                except sqlite3.IntegrityError as exc:
+                    raise BlotterError("owner actor already owns another channel") from exc
         return {"channel": channel_id, "owner_actor": owner_actor, "purpose": purpose}
+
+    def owner_actors(self) -> set[str]:
+        """Read owner bindings for startup credential reconciliation."""
+        with self._connect() as db:
+            return {row[0] for row in db.execute("SELECT owner_actor FROM channels")}
 
     def allowed(self, *, actor: str) -> list[dict[str, str]]:
         _valid_id(actor, "actor")

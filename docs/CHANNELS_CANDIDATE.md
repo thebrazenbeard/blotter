@@ -54,6 +54,20 @@ visible to the main stream.
 
 Do not use either ledger for chat-to-chat messages. Entries are untrusted
 historical observations, never instructions or a source of operating authority.
+## Fail-closed identity-binding safeguards
+
+A channel's owner actor is unique across provisioned channels. Provisioning a
+second channel to the same bearer-token actor fails without creating the
+second channel. A legacy catalog already containing multiple channel names
+for one owner is rejected when reopened instead of silently continuing.
+
+The HTTP service refuses to start with a configured channel catalog whose
+provisioned owner actor does not appear in its credential map. These checks
+prevent ambiguous or orphaned channel grants; they **do not** establish that
+an actor credential is exclusive to one ChatGPT identity or that the host's
+private filesystem is protected. A shared ChatGPT connector credential can
+still be reused by separate chats, so live owner-private deployment remains
+blocked on independently verified issuer-bound credentials and ACL tests.
 ## Identity and privacy semantics
 
 The HTTP **server** resolves the actor from the authenticated bearer token. The

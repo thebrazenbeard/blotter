@@ -164,6 +164,8 @@ def create_server(
         if actor in seen_actors:
             raise BlotterError("duplicate actor identity in credentials")
         seen_actors.add(actor)
+    if channels is not None and not channels.owner_actors().issubset(seen_actors):
+        raise BlotterError("provisioned channel owner lacks a server credential")
     try:
         loopback = ipaddress.ip_address(host).is_loopback
     except ValueError:
