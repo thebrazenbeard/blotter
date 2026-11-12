@@ -1,3 +1,5 @@
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,6 +65,72 @@ class ChannelCatalogTests(unittest.TestCase):
         for channel in ("igor-dev", "realm-child", "vera-work", "new-chat"):
             with self.subTest(reject=channel), self.assertRaises(BlotterError):
                 self.channels.provision(channel, owner_actor="actor." + channel)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission contract")
+    def test_private_minotaur_storage_never_world_readable(self):
+        # A standard operator umask of 022 must not expose the private ledger.
+        previous = os.umask(0o022)
+        try:
+            root = Path(self.tmp.name) / "minotaur-private"
+            catalog = ChannelCatalog(root)
+            catalog.provision("minotaur", owner_actor="bt2.minotaur")
+            ledger = catalog.ledger("minotaur", actor="bt2.minotaur")
+            ledger.record(actor="bt2.minotaur", kind="trial.observed",
+                          message="private test receipt")
+            protected = (root, root / "ledgers",
+                         root / "channels.sqlite3",
+                         root / "ledgers" / "minotaur.sqlite3")
+            for path in protected:
+                with self.subTest(path=path.name):
+                    mode = stat.S_IMODE(path.stat().st_mode)
+                    self.assertEqual(mode & 0o077, 0,
+                                     f"{path.name} insecure mode {oct(mode)}")
+            self.assertEqual(self.main.list(), [])
+        finally:
+            os.umask(previous)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission contract")
+    def test_preexisting_insecure_private_catalog_fails_closed(self):
+        root = Path(self.tmp.name) / "insecure-private"
+        root.mkdir(mode=0o755)
+        os.chmod(root, 0o755)
+        with self.assertRaisesRegex(BlotterError, "permissions"):
+            ChannelCatalog(root)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission contract")
+    def test_insecure_existing_private_databases_fail_closed(self):
+        root = Path(self.tmp.name) / "private-existing-file"
+        catalog = ChannelCatalog(root)
+        os.chmod(root / "channels.sqlite3", 0o644)
+        with self.assertRaisesRegex(BlotterError, "database permissions"):
+            ChannelCatalog(root)
+        os.chmod(root / "channels.sqlite3", 0o600)
+
+        catalog.provision("minotaur", owner_actor="bt2.minotaur")
+        catalog.ledger("minotaur", actor="bt2.minotaur")
+        path = root / "ledgers" / "minotaur.sqlite3"
+        os.chmod(path, 0o644)
+        with self.assertRaisesRegex(BlotterError, "database permissions"):
+            catalog.ledger("minotaur", actor="bt2.minotaur")
+
+    def test_minotaur_owner_and_main_are_separate(self):
+        catalog = self.channels
+        catalog.provision("minotaur", owner_actor="bt2.minotaur",
+                          purpose="Minotaur factual evaluation receipts")
+        ledger = catalog.ledger("minotaur", actor="bt2.minotaur")
+        saved = ledger.record(actor="bt2.minotaur", kind="evaluation.recorded",
+                              message="private synthetic receipt",
+                              event_id="minotaur-private-synthetic-1")
+        self.assertEqual(saved["seq"], 1)
+        self.assertEqual(self.main.tail(), [])
+        self.assertEqual([row["channel"] for row in
+                          catalog.allowed(actor="bt2.minotaur")], ["minotaur"])
+        self.assertEqual(catalog.allowed(actor="other"), [])
+        for actor in ("other", "bt2.one.lappy"):
+            with self.subTest(actor=actor), self.assertRaisesRegex(
+                    BlotterError, "channel unavailable"):
+                catalog.ledger("minotaur", actor=actor)
+        self.assertEqual(ledger.verify()["count"], 1)
 
     def test_reopen_preserves_channel_separate_cursor(self):
         self.channels.provision("vera", owner_actor="vera")
