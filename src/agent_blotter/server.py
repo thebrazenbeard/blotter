@@ -351,7 +351,7 @@ def create_server(
                     self._send(404, {"error": "channel unavailable"})
                     return
                 route = "/v1/" + match.group(2)
-            if route not in ("/v1/events", "/v1/tail"):
+            if route not in ("/v1/events", "/v1/tail", "/v1/substantive-tail"):
                 self._send(404, {"error": "route not found"})
                 return
             try:
@@ -360,11 +360,13 @@ def create_server(
                 # repeated-field rejection below.
                 args = parse_qs(parts.query, strict_parsing=True,
                                 keep_blank_values=True)
-                if route == "/v1/tail":
+                if route in ("/v1/tail", "/v1/substantive-tail"):
                     if set(args) - {"limit"} or any(len(values) != 1 for values in args.values()):
                         raise BlotterError("unknown or repeated tail query fields")
                     limit = int(args.get("limit", ["20"])[0])
-                    self._send(200, {"events": target.tail(limit=limit)})
+                    method = (target.tail_substantive if route == "/v1/substantive-tail"
+                              else target.tail)
+                    self._send(200, {"events": method(limit=limit)})
                     return
                 if set(args) - READ_FIELDS or any(len(values) != 1 for values in args.values()):
                     raise BlotterError("unknown or repeated query fields")

@@ -18,7 +18,7 @@ RESERVED = frozenset({"main"})
 # Current project owner explicitly authorized these supplemental channels.
 # main remains the existing universal log, not an owner-provisioned channel.
 # No agent/chat may extend this set by inference or self-registration.
-AUTHORIZED_CHANNEL_IDS = frozenset({"aeonith", "vera", "vera-works", "igor", "driftspace", "minotaur"})
+AUTHORIZED_CHANNEL_IDS = frozenset({"aeonith", "vera", "vera-works", "igor", "driftspace", "minotaur", "realm"})
 
 
 class ChannelCatalog:
