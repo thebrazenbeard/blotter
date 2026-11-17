@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .remote import RemoteBlotter
 from .store import Blotter, BlotterError, IntegrityError
+from .channels import ChannelCatalog
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,8 +53,21 @@ def main(argv: list[str] | None = None) -> int:
     exported = commands.add_parser("export", help="export global history as JSONL")
     exported.add_argument("--after-seq", type=int, default=0)
     commands.add_parser("verify", help="locally verify sequence and hash integrity")
+    provision = commands.add_parser(
+        "channel-provision", help="owner-only local configuration of supplemental channel")
+    provision.add_argument("--channels-root", required=True)
+    provision.add_argument("--channel", required=True)
+    provision.add_argument("--owner-actor", required=True)
+    provision.add_argument("--purpose", default="")
     args = parser.parse_args(argv)
     try:
+        if args.command == "channel-provision":
+            if args.url:
+                raise BlotterError("channel provisioning is a local operator operation")
+            result = ChannelCatalog(args.channels_root).provision(
+                args.channel, owner_actor=args.owner_actor, purpose=args.purpose)
+            print(json.dumps(result, ensure_ascii=True, sort_keys=True))
+            return 0
         if args.url:
             if args.command in ("init", "verify"):
                 raise BlotterError("init and verify are local administrator operations")
