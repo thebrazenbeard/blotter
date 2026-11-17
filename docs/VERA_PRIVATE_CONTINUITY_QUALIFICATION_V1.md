@@ -81,3 +81,25 @@ privacy between those chats. Source tests establish limited enforcement
 properties and the synthetic counterexample, not production isolation.
 No private channel may be represented as installed or safe until the
 issuer, role grants, OS protections and live adversarial checks pass.
+
+## Engineer A subsequent source mitigation (still not release authorization)
+
+- This review branch removes the silent editor-open Node bootstrap
+  (`.vscode/ini`), clears its `folderOpen` task, and disables automatic
+  editor tasks. This is checkout containment only; unmerged source remains
+  unchanged outside this branch.
+- `create_server` now defaults all optional private HTTP routes to
+  404 unless trusted host code injects a `private_principal_verifier`.
+  The CLI cannot configure that verifier; the shared main routes remain.
+- The callback is a **trust boundary**, not an issuer implementation.
+  A permissive callback, or one trusting client headers, actor labels,
+  chat-provided strings, or a shared bearer, reproduces the privacy failure.
+  Existing channel-positive tests explicitly use synthetic actor-only
+  callback fixtures. They do not qualify production privacy.
+- Tests check owner denial by default for list/tail/events/check/record,
+  spoofed principal and issuer headers, and verifier-exception refusal.
+- Real issuer-side identity, authorized cross-chat grants, revocation,
+  replay prevention, body/route binding, host ACLs, independent review,
+  and native ChatGPT consumption remain **not implemented**.
+- No production service change, credential change, private-data migration,
+  merge, training, or protected installation is included.
