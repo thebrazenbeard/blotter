@@ -11,7 +11,7 @@ Scope: SOURCE_ONLY. This document describes a read-only offline Python verifier 
 - `parent_id`, `parent_body_sha256` (nullable for an initial message);
 - `provenance_class="SELF_ASSERTED"` only.
 
-The caller supplies independently pinned recipient, repo and commit per ID. Optional externally stored receipt SHA-256 and prior-seen ID snapshots tighten modification/replay checks. Those caller inputs are NOT certified as trusted by this source module. Without a protected issuer and protected history they can be forged by the same local user. The return is `integrity_status=MATCHED`, `identity_status=UNQUALIFIED`, `admitted=false`, sorted IDs; negative findings raise `HandoffError`. No return value grants execution or access authority.
+The caller supplies independently pinned recipient, repo and commit per ID. Optional externally stored receipt SHA-256 and prior-seen ID snapshots tighten modification/replay checks. Those caller inputs are NOT certified as trusted by this source module. Without a protected issuer and protected history they can be forged by the same local user. The return is `integrity_status=SELF_CONSISTENT` without a complete supplied receipt-hash reference set, or `integrity_status=MATCHED` when every receipt matches a supplied digest. The latter is **not** issuer authentication: a malicious caller can supply fabricated reference hashes. Both return `identity_status=UNQUALIFIED`, `admitted=false`, sorted IDs; negative findings raise `HandoffError`. No return value grants execution or access authority.
 
 ## Synthetic controls
 
