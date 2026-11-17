@@ -17,7 +17,10 @@ class CombinedRoutesTest(unittest.TestCase):
             channels = ChannelCatalog(root / "private")
             channels.provision("vera", owner_actor="vera")
             service = create_server(main, {"A"*40:"vera", "B"*40:"other"},
-                                    channels=channels, port=0)
+                                    channels=channels, port=0,
+                                    # Synthetic legacy fixture; no trusted chat issuer.
+                                    private_principal_verifier=lambda _request, actor, channel, _route:
+                                        actor == "vera" and channel == "vera")
             thread = threading.Thread(target=service.serve_forever,
                                       kwargs={"poll_interval":.01}, daemon=True)
             thread.start()

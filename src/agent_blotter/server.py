@@ -17,6 +17,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from typing import Callable
 
 from .store import Blotter, BlotterError, SCHEMA_VERSION, _valid_id
 from .channels import ChannelCatalog
@@ -152,6 +153,7 @@ def create_server(
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
     max_workers: int = DEFAULT_MAX_WORKERS,
     channels: ChannelCatalog | None = None,
+    private_principal_verifier: Callable[[BaseHTTPRequestHandler, str, str, str], bool] | None = None,
 ) -> ThreadingHTTPServer:
     """Create a bound service. Non-loopback binds require server TLS."""
     if not isinstance(credentials, dict) or not credentials:
@@ -166,6 +168,8 @@ def create_server(
         seen_actors.add(actor)
     if channels is not None and not channels.owner_actors().issubset(seen_actors):
         raise BlotterError("provisioned channel owner lacks a server credential")
+    if private_principal_verifier is not None and not callable(private_principal_verifier):
+        raise BlotterError("private identity verifier must be callable")
     try:
         loopback = ipaddress.ip_address(host).is_loopback
     except ValueError:
@@ -237,6 +241,18 @@ def create_server(
             self._send(403, {"error": "invalid credentials"})
             return None
 
+        def _private_verified(self, actor: str, channel: str, route: str) -> bool:
+            # A bearer-bound actor is NOT a verified ChatGPT caller identity.
+            # The CLI offers no verifier, therefore private HTTP routes deny
+            # by default. Any injected verifier must independently authenticate
+            # an issuer-bound principal; request headers alone are untrusted.
+            if private_principal_verifier is None:
+                return False
+            try:
+                return private_principal_verifier(self, actor, channel, route) is True
+            except Exception:
+                return False
+
         def _body(self) -> dict:
             if self.headers.get("Transfer-Encoding") is not None:
                 raise BlotterError("Transfer-Encoding is unsupported")
@@ -272,7 +288,8 @@ def create_server(
             target = ledger
             if route.startswith("/v1/channels/"):
                 match = re.fullmatch(r"/v1/channels/([a-z][a-z0-9_.-]{0,63})/(check|record)", route)
-                if channels is None or match is None:
+                if (channels is None or match is None or
+                        not self._private_verified(actor, match.group(1), route)):
                     self.close_connection = True
                     self._send(404, {"error": "route not found"})
                     return
@@ -334,17 +351,20 @@ def create_server(
                 self._send(200, {"ok": True, "schema_version": SCHEMA_VERSION})
                 return
             if route == "/v1/channels":
-                if channels is None:
+                if channels is None or private_principal_verifier is None:
                     self._send(404, {"error": "route not found"})
                     return
                 if parts.query:
                     self._send(422, {"error": "channel list has no query fields"})
                     return
-                self._send(200, {"channels": channels.allowed(actor=actor)})
+                permitted = [entry for entry in channels.allowed(actor=actor)
+                             if self._private_verified(actor, entry["channel"], route)]
+                self._send(200, {"channels": permitted})
                 return
             if route.startswith("/v1/channels/"):
                 match = re.fullmatch(r"/v1/channels/([a-z][a-z0-9_.-]{0,63})/(events|tail)", route)
-                if channels is None or match is None:
+                if (channels is None or match is None or
+                        not self._private_verified(actor, match.group(1), route)):
                     self._send(404, {"error": "route not found"})
                     return
                 try:
