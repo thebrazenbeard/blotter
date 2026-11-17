@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import stat
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -21,6 +22,48 @@ RESERVED = frozenset({"main"})
 # main remains the existing universal log, not an owner-provisioned channel.
 # No agent/chat may extend this set by inference or self-registration.
 AUTHORIZED_CHANNEL_IDS = frozenset({"aeonith", "vera", "vera-works", "igor", "driftspace", "minotaur", "realm"})
+
+
+def _private_windows_acl(path: Path, *, directory: bool) -> None:
+    """Reject unsafe Windows ACEs; never repair ACLs as a side effect.
+
+    The current service owner/SYSTEM/admins and current-file OWNER RIGHTS are
+    trusted here. This does not provide per-chat identity, protect against a
+    hostile same-UID process, or attest path handles against renaming races.
+    """
+    from .mcp_stdio import _trusted_windows_powershell
+
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$target = [IO.Path]::GetFullPath($env:BLOTTER_CHANNEL_ACL_PATH)
+$item = Get-Item -LiteralPath $target -Force -ErrorAction Stop
+if (([bool]$item.PSIsContainer) -ne ($env:BLOTTER_CHANNEL_ACL_DIRECTORY -eq '1')) { exit 4 }
+if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 5 }
+$acl = Get-Acl -LiteralPath $target -ErrorAction Stop
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$allowed = @($me, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-4', 'S-1-3-0')
+$owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+if ($owner -notin @($me, 'S-1-5-18', 'S-1-5-32-544')) { exit 6 }
+$hasOwnerAccess = $false
+foreach ($rule in $acl.Access) {
+    if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+    $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($sid -notin $allowed) { exit 7 }
+    if ($sid -eq $me -or $sid -eq 'S-1-3-4') { $hasOwnerAccess = $true }
+}
+if (-not $hasOwnerAccess) { exit 8 }
+"""
+    env = dict(os.environ, BLOTTER_CHANNEL_ACL_PATH=str(path),
+               BLOTTER_CHANNEL_ACL_DIRECTORY="1" if directory else "0")
+    try:
+        result = subprocess.run(
+            [_trusted_windows_powershell(), "-NoProfile", "-NonInteractive",
+             "-Command", script],
+            env=env, capture_output=True, text=True, timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise BlotterError("private channel Windows ACL could not be verified") from exc
+    if result.returncode != 0:
+        raise BlotterError("unsafe private channel Windows permissions")
 
 
 def _private_directory(path: Path) -> None:
@@ -38,6 +81,8 @@ def _private_directory(path: Path) -> None:
                 or info.st_uid != os.geteuid()
                 or stat.S_IMODE(info.st_mode) & 0o077):
             raise BlotterError("unsafe private channel directory permissions")
+    elif os.name == "nt":
+        _private_windows_acl(path, directory=True)
 
 
 def _private_database_file(path: Path) -> None:
@@ -48,8 +93,19 @@ def _private_database_file(path: Path) -> None:
     """
     if path.is_symlink():
         raise BlotterError("channel database may not be a symlink")
+    if os.name == "nt":
+        # The parent directory has already passed ACL checks. A new file
+        # inherits its restricted DACL before contents are added; refuse any
+        # pre-existing file with unexpected inherited or explicit ACEs.
+        try:
+            with path.open("xb"):
+                pass
+        except FileExistsError:
+            pass
+        _private_windows_acl(path, directory=False)
+        return
     if os.name != "posix":
-        return  # Windows ACL and private identity qualification remain HOLD.
+        raise BlotterError("private channel file protection unsupported")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:

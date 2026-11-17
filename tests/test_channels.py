@@ -1,5 +1,6 @@
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -131,6 +132,44 @@ class ChannelCatalogTests(unittest.TestCase):
                     BlotterError, "channel unavailable"):
                 catalog.ledger("minotaur", actor=actor)
         self.assertEqual(ledger.verify()["count"], 1)
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL contract")
+    def test_windows_private_root_rejects_everyone_read_access(self):
+        root = Path(self.tmp.name) / "insecure-windows-root"
+        root.mkdir()
+        try:
+            # Isolated disposable test tree only; never modify a shared ACL.
+            subprocess.run(["icacls.exe", str(root), "/grant",
+                            "*S-1-1-0:(OI)(CI)(RX)"],
+                           check=True, capture_output=True)
+            with self.assertRaisesRegex(BlotterError, "permissions"):
+                ChannelCatalog(root)
+            self.assertFalse((root / "channels.sqlite3").exists())
+        finally:
+            pass
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL contract")
+    def test_windows_private_root_rejects_authenticated_users_access(self):
+        root = Path(self.tmp.name) / "insecure-authenticated-users"
+        root.mkdir()
+        subprocess.run(["icacls.exe", str(root), "/grant",
+                        "*S-1-5-11:(OI)(CI)(RX)"],
+                       check=True, capture_output=True)
+        with self.assertRaisesRegex(BlotterError, "permissions"):
+            ChannelCatalog(root)
+        self.assertFalse((root / "channels.sqlite3").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL contract")
+    def test_windows_private_ledger_rejects_world_readable_file(self):
+        root = Path(self.tmp.name) / "windows-owned-root"
+        catalog = ChannelCatalog(root)
+        catalog.provision("minotaur", owner_actor="bt2.minotaur")
+        catalog.ledger("minotaur", actor="bt2.minotaur")
+        target = root / "ledgers" / "minotaur.sqlite3"
+        subprocess.run(["icacls.exe", str(target), "/grant", "*S-1-1-0:(R)"],
+                       check=True, capture_output=True)
+        with self.assertRaisesRegex(BlotterError, "permissions"):
+            catalog.ledger("minotaur", actor="bt2.minotaur")
 
     def test_reopen_preserves_channel_separate_cursor(self):
         self.channels.provision("vera", owner_actor="vera")
