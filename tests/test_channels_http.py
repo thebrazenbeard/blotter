@@ -96,6 +96,55 @@ class ChannelHTTPTests(unittest.TestCase):
         self.assertEqual(self.catalog.ledger("vera", actor="agent.one")
                          .verify()["count"], 3)
 
+    def test_minotaur_owner_and_nonowner_credentials_are_distinct(self):
+        self.catalog.provision("minotaur", owner_actor="agent.two",
+                               purpose="Minotaur test-only continuity")
+        owner = self.two.channel("minotaur")
+        initial = owner.check(session="minotaur-test", after_seq=0)
+        owner.record(kind="evaluation.receipt", message="synthetic private",
+                     event_id="minotaur-private-http-1")
+        recovered = owner.check(session="minotaur-test",
+                                after_seq=initial["next_seq"],
+                                expected_after_hash=initial["next_hash"])
+        self.assertEqual([row["kind"] for row in recovered["events"]],
+                         ["evaluation.receipt"])
+        self.assertEqual([row["message"] for row in owner.tail()
+                          if row["kind"] == "evaluation.receipt"],
+                         ["synthetic private"])
+        self.assertEqual(self.one.channels()[0]["channel"], "vera")
+        self.assertEqual(self.one.tail(), [])
+        for path, method, data in (
+            ("/v1/channels/minotaur/events", "GET", None),
+            ("/v1/channels/minotaur/tail", "GET", None),
+            ("/v1/channels/minotaur/check", "POST", b"{}"),
+            ("/v1/channels/minotaur/record", "POST",
+             b'{"kind":"test","message":"spoof"}'),
+        ):
+            with self.subTest(path=path):
+                req = urllib.request.Request(
+                    self.url + path, data=data, method=method,
+                    headers={"Authorization": "Bearer " + "A" * 40,
+                             "Content-Type": "application/json",
+                             "X-Blotter-Actor": "agent.one"})
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(req, timeout=3)
+                self.assertEqual(caught.exception.code, 404)
+                caught.exception.close()
+                # Supplying a stolen principal *label* with the wrong token
+                # is explicitly rejected before channel authorization.
+                spoof = urllib.request.Request(
+                    self.url + path, data=data, method=method,
+                    headers={"Authorization": "Bearer " + "A" * 40,
+                             "Content-Type": "application/json",
+                             "X-Blotter-Actor": "agent.two"})
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(spoof, timeout=3)
+                self.assertEqual(rejected.exception.code, 403)
+                rejected.exception.close()
+        self.assertEqual(self.main.verify()["count"], 0)
+        self.assertEqual(self.catalog.ledger("minotaur", actor="agent.two")
+                         .verify()["count"], 3)
+
     def test_default_server_has_no_channel_routes(self):
         # Legacy main-only behavior remains unchanged if channels are disabled.
         server = create_server(Blotter(Path(self.tmp.name) / "legacy.sqlite3"),
