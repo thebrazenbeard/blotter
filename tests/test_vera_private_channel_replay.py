@@ -27,6 +27,10 @@ class VeraPrivateChannelReplayTests(unittest.TestCase):
         self.server = create_server(
             self.main, {"A" * 40: "vera.bound", "B" * 40: "engineer.other"},
             port=0, channels=self.catalog,
+            # Intentionally insecure legacy actor-only fixture preserves the
+            # two-client shared-bearer counterexample, not release permission.
+            private_principal_verifier=lambda _request, actor, channel, _route:
+                actor == "vera.bound" and channel == "vera",
         )
         thread = threading.Thread(
             target=self.server.serve_forever,
