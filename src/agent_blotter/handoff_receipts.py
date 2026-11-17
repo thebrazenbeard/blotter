@@ -191,7 +191,10 @@ def verify_exchange(
 
     ids = sorted(seen, key=lambda item: (seen[item][1], item))
     return {
-        "integrity_status": "MATCHED",
+        # Without an out-of-band receipt digest for every message, a caller
+        # who controls both files can rewrite both and preserve consistency.
+        "integrity_status": ("MATCHED" if expected_receipt_digests is not None
+                             else "SELF_CONSISTENT"),
         "identity_status": "UNQUALIFIED",
         "admitted": False,
         "messages": ids,
