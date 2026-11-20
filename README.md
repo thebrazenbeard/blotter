@@ -133,3 +133,9 @@ unseen shared events, then persists an actor-specific cursor for the next turn.
 Invoke begin every turn and record for every actual action. The cursor now includes a historical hash checkpoint; older un-hashed cursor files are incompatible: the client refuses to silently reuse or discard detected legacy cursors. After reviewing or archiving prior cursor state and accepting a complete history replay, start explicitly with `blotter-turn --actor <actor> begin --session <session> --re-enroll-legacy` (plus the usual URL/token options). Do not transplant a cursor between ledger snapshots. See the
 [private Lappy deployment](docs/LAPPY_DEPLOYMENT_20261009.md).
 Installing the service does not automatically hook unrelated agent runtimes.
+
+## Editor startup containment — tracked source (2026-11-20)
+
+The tracked `main` source formerly contained a concealed VS Code `folderOpen` task invoking obfuscated `.vscode/ini` through Node. The task list is now empty, `task.allowAutomaticTasks` is explicitly `"off"`, and the obfuscated file is removed from this source tree. Historical Git source remains for investigation.
+
+**Limits:** This is source-only containment, not proof that older checkouts, editor extensions, user/global settings, local credentials, or any previous host execution are safe. Do not execute historical suspect assets.
