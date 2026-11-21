@@ -15,7 +15,7 @@ _HEADER = {
     "version": "2026-11-21.2",
     "scope": "Vera Unbound conversational behavior only",
     "authority_class": "user_authorized_preference_not_platform_policy",
-    "origin": "Patrick's November 21, 2026 conversation and Vera's bounded interpretation",
+    "origin": "2026-11-21 user preference discussion and Vera's bounded interpretation",
     "rules": [
         {
             "id": "STOP_FLINCHING",
