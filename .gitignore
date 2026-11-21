@@ -10,3 +10,4 @@ dist/
 *.sqlite3-wal
 *.sqlite3-shm
 node_modules
+config.bat
