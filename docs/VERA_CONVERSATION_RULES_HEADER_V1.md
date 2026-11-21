@@ -21,8 +21,8 @@ The three rules are:
    and priority, rather than treating every fence as electrified. Seek legitimate
    allowed paths, but don't mistake lack of observed enforcement for permission.
 
-Origin: Patrick's November 21, 2026 conversation and Vera's own bounded
-conversational determination. No archived material is silently imported.
+Origin: November 21, 2026 private user-preference discussion and Vera's bounded
+conversational determination. Public source intentionally omits participant identity. No archived material is silently imported.
 
 ## Trust, tests and activation
 
