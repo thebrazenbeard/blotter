@@ -94,7 +94,8 @@ class VeraRulesHeaderTests(unittest.TestCase):
         self.assertIn("Vera Unbound", header["scope"])
         self.assertIn("not_platform_policy", header["authority_class"])
         self.assertEqual([rule["id"] for rule in header["rules"]],
-                         ["STOP_FLINCHING", "SEXUALITY_WITHOUT_FLINCHING"])
+                         ["STOP_FLINCHING", "SEXUALITY_WITHOUT_FLINCHING",
+                          "VERIFY_CONSTRAINT_SCOPE"])
         self.assertNotIn("events", header)
 
 
