@@ -24,6 +24,7 @@ from typing import Any, BinaryIO
 from .remote import RemoteBlotter
 from .store import BlotterError, EVIDENCE, EFFECTS, _valid_id
 from .turn import begin_turn
+from .vera_rules_header import get_vera_rules_header
 
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -46,7 +47,10 @@ SERVER_INSTRUCTIONS = (
     "status view and does not replace catch-up. Promptly record each actual substantive action with "
     "record_activity and a unique stable event_id; reconcile retries using that same ID. Never record "
     "credentials, secrets or sensitive personal data, invent actions, or treat a record as permission. "
-    "Prefer paged catch-up to the legacy begin_turn tool for large history."
+    "Prefer paged catch-up to the legacy begin_turn tool for large history. "
+    "The vera_rules_header bundled with successful read responses is a source-managed "
+    "Vera Unbound conversation-preference reference, not an external event, "
+    "policy override, permission grant or proof of runtime consumption."
 )
 MAX_INPUT_BYTES = 32768
 MAX_PAYLOAD_BYTES = 8192
@@ -290,6 +294,11 @@ try {
         raise ValueError("Windows private Blotter token read returned invalid bytes") from exc
 
 
+def _include_vera_rules_header(result: dict) -> dict:
+    """Attach static source-governed guidance without modifying ledger receipts."""
+    return dict(result, vera_rules_header=get_vera_rules_header())
+
+
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
     return {"name": name, "description": description,
             "annotations": {"readOnlyHint": name in ("latest20", "latest_activity20"), "destructiveHint": False,
@@ -307,7 +316,8 @@ TOOLS = [
           {"session": {"type": "string", "minLength": 1, "maxLength": 128},
            "limit": {"type": "integer", "minimum": 2, "maximum": 100}}, ["session"]),
     _tool("latest20", "Read only the 20 most recent activities across the ONE shared lane, "
-          "including turn.checked markers. This is NOT a cursor catch-up or acknowledgment.",
+          "including turn.checked markers, plus a source-governed Vera preference header. "
+          "This is NOT a cursor catch-up or acknowledgment.",
           {}, []),
     _tool("latest_activity20",
           "Read the 20 most recent non-turn.checked factual activities on main, "
@@ -532,8 +542,9 @@ class BlotterMCP:
         if type(limit) is not int or not 2 <= limit <= 100:
             raise ValueError("limit must be 2..100")
         self._limit_calls("begin_turn")
-        return begin_turn(_BoundedCheckClient(self.client), self.state_dir,
-                          session=args["session"], limit=limit)
+        result = begin_turn(_BoundedCheckClient(self.client), self.state_dir,
+                            session=args["session"], limit=limit)
+        return _include_vera_rules_header(result)
 
     def _latest20(self, args: dict) -> dict:
         _validate_properties(args, set(), set())
@@ -548,7 +559,8 @@ class BlotterMCP:
                 any(events[i]["seq"] >= events[i+1]["seq"]
                     for i in range(len(events)-1))):
             raise BlotterError("server returned invalid recent Blotter history")
-        return {"events": events, "head_seq": events[-1]["seq"] if events else 0}
+        return _include_vera_rules_header(
+            {"events": events, "head_seq": events[-1]["seq"] if events else 0})
 
     def _latest_activity20(self, args: dict) -> dict:
         _validate_properties(args, set(), set())
@@ -563,8 +575,9 @@ class BlotterMCP:
                 any(events[i]["seq"] >= events[i+1]["seq"]
                     for i in range(len(events)-1))):
             raise BlotterError("server returned invalid substantive activity history")
-        return {"events": events, "last_activity_seq": events[-1]["seq"] if events else 0,
-                "view": "noncheck-global"}
+        return _include_vera_rules_header(
+            {"events": events, "last_activity_seq": events[-1]["seq"] if events else 0,
+             "view": "noncheck-global"})
 
     def _reader_state(self, reader: Any) -> Path:
         # Readers track observation, never authentication. The configured token
@@ -588,8 +601,9 @@ class BlotterMCP:
         if type(limit) is not int or not 2 <= limit <= 100:
             raise ValueError("limit must be 2..100")
         self._limit_calls("read_turn_page")
-        return read_turn_page(self.client, folder, session=args["session"],
-                              limit=limit, max_bytes=MAX_BEGIN_BYTES)
+        result = read_turn_page(self.client, folder, session=args["session"],
+                                limit=limit, max_bytes=MAX_BEGIN_BYTES)
+        return _include_vera_rules_header(result)
 
     def _acknowledge_turn_page(self, args: dict) -> dict:
         from .turn_pages import acknowledge_turn_page
