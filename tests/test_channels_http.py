@@ -24,7 +24,10 @@ class ChannelHTTPTests(unittest.TestCase):
                                purpose="Vera private work and provenance")
         self.server = create_server(self.main, {"A" * 40: "agent.one",
                                                 "B" * 40: "agent.two"},
-                                    port=0, channels=self.catalog)
+                                    port=0, channels=self.catalog,
+                                    # Synthetic legacy fixture; NOT real issuer identity.
+                                    private_principal_verifier=lambda _request, actor, channel, _route:
+                                        actor == "agent.one" and channel == "vera")
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        kwargs={"poll_interval": 0.01}, daemon=True)
         self.thread.start()
